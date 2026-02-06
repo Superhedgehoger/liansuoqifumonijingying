@@ -1,5 +1,32 @@
 # 更新日志
 
+## 0.7.3
+
+- 完成 P2 中期能力：
+  - 事件对冲动作：应急供电 / 临时促销 / 加班扩容（`mitigation`）
+  - 自动补货：触发点 + 安全库存 + 目标库存 + 提前期（replenishment rules + pending inbounds）
+  - 选址可达性：`distance_mode=road_proxy|road_graph|euclidean`，`road_graph` 支持 `graph_k_neighbors`
+- 账本增强：新增 `mitigation_cost`、`mitigation_actions_json`、`replenishment_cost`、`replenishment_orders_json`、`inbound_arrivals_json`
+- API 增加：`POST /api/stores/{store_id}/replenishment/rules`、`DELETE /api/stores/{store_id}/replenishment/rules/{sku}`
+- 新增回归脚本：`tools/test_p2_midterm.py`（3 项）
+
+## 0.7.2
+
+- 完成 P1 策略能力：新增选址推荐 API（`/api/site-recommendations`）与前端策略实验页（`/strategy`）
+- 新增竞品分流参数：门店支持 `local_competition_intensity` 与 `attractiveness_index`，并接入订单计算
+- 新增场景对比 API（`/api/scenarios/compare`）：同初始状态并行仿真，返回 baseline 与场景 delta 指标
+- P2-1 进展：选址推荐支持 `distance_mode=road_proxy|euclidean`，默认 `road_proxy`
+- P2-2 进展：新增 `distance_mode=road_graph`（站点图最短路近似）与 `graph_k_neighbors` 参数，推荐结果增加 `distance_confidence` 与 `score_breakdown`
+
+## 0.7.1
+
+- 新增随机事件系统：事件模板/生效事件/历史记录，支持 scope（global/站点/门店）、持续时间与 cooldown
+- 引擎支持可复现随机：state 持久化 `rng_seed` + `rng_state`，分段多次 simulate 也保持一致
+- 账本增强：`data/ledger.csv` 增加 `store_closed`、各倍率字段与 `event_summary_json` 便于审计回放
+- API 增加事件管理端点：seed 设置、模板增删改、手动注入、事件查询
+- 前端新增 `事件管理` 页面：模板 CRUD、注入、active/history 展示
+- 新增最小测试脚本：`tools/test_events.py`
+
 ## 0.6.10
 
 - 薪酬提成口径升级：洗车/维保/洗美提成支持按“收入/毛利”，配件提成支持按“配件收入/配件毛利”

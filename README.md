@@ -39,6 +39,53 @@ npm run dev
 
 说明：Vite 已配置代理，将 `/api` 与 `/download` 转发到后端 `http://127.0.0.1:8000`。
 
+## 随机事件系统
+
+- 前端入口：侧边栏 `事件管理`（路由：`/events`）
+- 后端字段：`GET /api/state` 返回 `events`（包含 rng_seed/templates/active/history）
+- 账本审计：`data/ledger.csv` 每行增加 `store_closed`、各倍率字段与 `event_summary_json`
+- 设计说明：`事件系统-研究与设计.md`
+
+### 最小测试（5 条）
+
+在项目根目录执行（Git Bash / 类 Unix shell）：
+
+```bash
+export PYTHONPATH=src
+python tools/test_events.py
+```
+
+Windows cmd 也可执行：
+
+```bat
+set PYTHONPATH=src
+python tools\test_events.py
+```
+
+## 策略实验（P1/P2）
+
+- 前端页面：`/strategy`
+- 能力：
+  - 选址推荐（`/api/site-recommendations`）
+  - 竞品分流参数（门店 `local_competition_intensity` / `attractiveness_index`）
+  - A/B 场景对比（`/api/scenarios/compare`，内存并行仿真，不写真实存档）
+  - 事件对冲动作：应急供电/临促补偿/加班扩容（门店 `mitigation`）
+  - 自动补货：安全库存 + 触发点 + 目标库存 + 采购提前期（replenishment rules）
+
+补充（P2-1 进展）：
+
+- 选址推荐支持 `distance_mode`：
+  - `road_proxy`（默认，按城市/片区/站点类型/波动率做可达性近似）
+  - `road_graph`（站点路网图最短路近似，可调 `graph_k_neighbors`）
+  - `euclidean`（直线距离）
+
+P2 回归测试：
+
+```bash
+export PYTHONPATH=src
+python tools/test_p2_midterm.py
+```
+
 ## 表单路由（导入/导出/运维）
 
 后端提供一个不依赖旧 WebUI 模板的简单表单页面：

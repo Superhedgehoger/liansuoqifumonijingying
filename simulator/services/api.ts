@@ -1,4 +1,4 @@
-import type { SimulationState, Station, Store } from '../types';
+import type { ScenarioCompareResult, SimulationState, SiteRecommendation, Station, Store } from '../types';
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -105,6 +105,32 @@ export function apiPurchaseInventory(store_id: string, payload: { sku: string; n
   });
 }
 
+export function apiUpsertReplenishmentRule(
+  store_id: string,
+  payload: {
+    sku: string;
+    name?: string;
+    enabled?: boolean;
+    reorder_point?: number;
+    safety_stock?: number;
+    target_stock?: number;
+    lead_time_days?: number;
+    unit_cost?: number;
+  }
+): Promise<SimulationState> {
+  return requestJson<SimulationState>(`/api/stores/${encodeURIComponent(store_id)}/replenishment/rules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+export function apiDeleteReplenishmentRule(store_id: string, sku: string): Promise<SimulationState> {
+  return requestJson<SimulationState>(`/api/stores/${encodeURIComponent(store_id)}/replenishment/rules/${encodeURIComponent(sku)}`, {
+    method: 'DELETE'
+  });
+}
+
 export function apiUpsertServiceLine(store_id: string, payload: any): Promise<SimulationState> {
   return requestJson<SimulationState>(`/api/stores/${encodeURIComponent(store_id)}/services`, {
     method: 'POST',
@@ -158,5 +184,62 @@ export function apiUpsertRole(store_id: string, payload: any): Promise<Simulatio
 export function apiDeleteRole(store_id: string, role: string): Promise<SimulationState> {
   return requestJson<SimulationState>(`/api/stores/${encodeURIComponent(store_id)}/roles/${encodeURIComponent(role)}`, {
     method: 'DELETE'
+  });
+}
+
+export function apiUpsertEventTemplate(payload: any): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/event-templates', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+export function apiDeleteEventTemplate(template_id: string): Promise<SimulationState> {
+  return requestJson<SimulationState>(`/api/event-templates/${encodeURIComponent(template_id)}`, {
+    method: 'DELETE'
+  });
+}
+
+export function apiInjectEvent(payload: any): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/events/inject', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+export function apiSetEventSeed(seed: number): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/events/seed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seed })
+  });
+}
+
+export function apiGetSiteRecommendations(
+  top_k = 10,
+  radius = 15,
+  distance_mode: 'euclidean' | 'road_proxy' | 'road_graph' = 'road_proxy',
+  graph_k_neighbors = 3
+): Promise<{ top_k: number; radius: number; distance_mode: string; graph_k_neighbors: number; recommendations: SiteRecommendation[] }> {
+  return requestJson<{ top_k: number; radius: number; distance_mode: string; graph_k_neighbors: number; recommendations: SiteRecommendation[] }>(
+    `/api/site-recommendations?top_k=${encodeURIComponent(top_k)}&radius=${encodeURIComponent(radius)}&distance_mode=${encodeURIComponent(distance_mode)}&graph_k_neighbors=${encodeURIComponent(graph_k_neighbors)}`
+  );
+}
+
+export function apiCompareScenarios(payload: {
+  days: number;
+  seed?: number;
+  scenarios: Array<{
+    name: string;
+    station_patches?: Array<Record<string, any>>;
+    store_patches?: Array<Record<string, any>>;
+  }>;
+}): Promise<ScenarioCompareResult> {
+  return requestJson<ScenarioCompareResult>('/api/scenarios/compare', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
   });
 }

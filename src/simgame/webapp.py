@@ -4,15 +4,18 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+import copy
+import heapq
 import json
 import math
+import uuid
 
 from fastapi import Body, FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
-from simgame.engine import EngineConfig, close_store, purchase_inventory, simulate_day
-from simgame.models import Asset, GameState, RolePlan, ServiceLine, ServiceProject, Station, Store
+from simgame.engine import EngineConfig, close_store, inject_event_from_template, purchase_inventory, simulate_day
+from simgame.models import ActiveEvent, Asset, EventHistoryRecord, EventTemplate, GameState, RolePlan, ServiceLine, ServiceProject, Station, Store
 from simgame.presets import apply_default_store_template
 from simgame.storage import (
     append_ledger_csv,
@@ -546,6 +549,8 @@ def create_app() -> FastAPI:
             "build_days": getattr(st, "build_days_total", 0),
             "operation_start_day": getattr(st, "operation_start_day", 1),
             "traffic_conversion_rate": getattr(st, "traffic_conversion_rate", 1.0),
+            "local_competition_intensity": float(getattr(st, "local_competition_intensity", 0.0) or 0.0),
+            "attractiveness_index": float(getattr(st, "attractiveness_index", 1.0) or 1.0),
             "labor_hour_price": float(getattr(st, "labor_hour_price", 120.0) or 0.0),
             "capex_total": st.capex_total,
             "capex_useful_life_days": getattr(st, "capex_useful_life_days", 5 * 365),
@@ -554,6 +559,60 @@ def create_app() -> FastAPI:
             "fixed_overhead_per_day": st.fixed_overhead_per_day,
             "strict_parts": bool(st.strict_parts),
             "cash_balance": float(getattr(st, "cash_balance", 0.0)),
+            "mitigation": {
+                "use_emergency_power": bool(getattr(getattr(st, "mitigation", None), "use_emergency_power", False)),
+                "emergency_capacity_multiplier": float(
+                    getattr(getattr(st, "mitigation", None), "emergency_capacity_multiplier", 0.60) or 0.60
+                ),
+                "emergency_variable_cost_multiplier": float(
+                    getattr(getattr(st, "mitigation", None), "emergency_variable_cost_multiplier", 1.15) or 1.15
+                ),
+                "emergency_daily_cost": float(
+                    getattr(getattr(st, "mitigation", None), "emergency_daily_cost", 120.0) or 120.0
+                ),
+                "use_promo_boost": bool(getattr(getattr(st, "mitigation", None), "use_promo_boost", False)),
+                "promo_traffic_boost": float(
+                    getattr(getattr(st, "mitigation", None), "promo_traffic_boost", 1.05) or 1.05
+                ),
+                "promo_conversion_boost": float(
+                    getattr(getattr(st, "mitigation", None), "promo_conversion_boost", 1.08) or 1.08
+                ),
+                "promo_daily_cost": float(getattr(getattr(st, "mitigation", None), "promo_daily_cost", 80.0) or 80.0),
+                "use_overtime_capacity": bool(
+                    getattr(getattr(st, "mitigation", None), "use_overtime_capacity", False)
+                ),
+                "overtime_capacity_boost": float(
+                    getattr(getattr(st, "mitigation", None), "overtime_capacity_boost", 1.20) or 1.20
+                ),
+                "overtime_daily_cost": float(
+                    getattr(getattr(st, "mitigation", None), "overtime_daily_cost", 100.0) or 100.0
+                ),
+            },
+            "auto_replenishment_enabled": bool(getattr(st, "auto_replenishment_enabled", False)),
+            "replenishment_rules": [
+                {
+                    "sku": str(k),
+                    "name": str(getattr(v, "name", "") or ""),
+                    "enabled": bool(getattr(v, "enabled", True)),
+                    "reorder_point": float(getattr(v, "reorder_point", 0.0) or 0.0),
+                    "safety_stock": float(getattr(v, "safety_stock", 0.0) or 0.0),
+                    "target_stock": float(getattr(v, "target_stock", 0.0) or 0.0),
+                    "lead_time_days": int(getattr(v, "lead_time_days", 0) or 0),
+                    "unit_cost": float(getattr(v, "unit_cost", 0.0) or 0.0),
+                }
+                for k, v in (getattr(st, "replenishment_rules", {}) or {}).items()
+            ],
+            "pending_inbounds": [
+                {
+                    "sku": str(getattr(p, "sku", "") or ""),
+                    "name": str(getattr(p, "name", "") or ""),
+                    "qty": float(getattr(p, "qty", 0.0) or 0.0),
+                    "unit_cost": float(getattr(p, "unit_cost", 0.0) or 0.0),
+                    "order_day": int(getattr(p, "order_day", 0) or 0),
+                    "arrive_day": int(getattr(p, "arrive_day", 0) or 0),
+                }
+                for p in (getattr(st, "pending_inbounds", []) or [])
+            ],
             "inventory": [_inventory_to_dto(x) for x in st.inventory.values()],
             "assets": [_asset_to_dto(a, i) for i, a in enumerate(st.assets)],
             "services": [_service_to_dto(l) for l in st.service_lines.values()],
@@ -622,20 +681,525 @@ def create_app() -> FastAPI:
             )
         return out
 
+    def _event_template_to_dto(t: EventTemplate) -> dict:
+        return {
+            "template_id": t.template_id,
+            "name": t.name,
+            "event_type": t.event_type,
+            "enabled": bool(t.enabled),
+            "daily_probability": float(t.daily_probability),
+            "duration_days_min": int(t.duration_days_min),
+            "duration_days_max": int(t.duration_days_max),
+            "cooldown_days": int(t.cooldown_days),
+            "intensity_min": float(t.intensity_min),
+            "intensity_max": float(t.intensity_max),
+            "scope": str(t.scope),
+            "target_strategy": str(getattr(t, "target_strategy", "random_one")),
+            "store_closed": bool(getattr(t, "store_closed", False)),
+            "traffic_multiplier_min": float(getattr(t, "traffic_multiplier_min", 1.0)),
+            "traffic_multiplier_max": float(getattr(t, "traffic_multiplier_max", 1.0)),
+            "conversion_multiplier_min": float(getattr(t, "conversion_multiplier_min", 1.0)),
+            "conversion_multiplier_max": float(getattr(t, "conversion_multiplier_max", 1.0)),
+            "capacity_multiplier_min": float(getattr(t, "capacity_multiplier_min", 1.0)),
+            "capacity_multiplier_max": float(getattr(t, "capacity_multiplier_max", 1.0)),
+            "variable_cost_multiplier_min": float(getattr(t, "variable_cost_multiplier_min", 1.0)),
+            "variable_cost_multiplier_max": float(getattr(t, "variable_cost_multiplier_max", 1.0)),
+        }
+
+    def _active_event_to_dto(e: ActiveEvent) -> dict:
+        return {
+            "event_id": e.event_id,
+            "template_id": e.template_id,
+            "name": e.name,
+            "event_type": e.event_type,
+            "scope": e.scope,
+            "target_id": e.target_id,
+            "start_day": int(e.start_day),
+            "end_day": int(e.end_day),
+            "intensity": float(e.intensity),
+            "store_closed": bool(e.store_closed),
+            "traffic_multiplier": float(e.traffic_multiplier),
+            "conversion_multiplier": float(e.conversion_multiplier),
+            "capacity_multiplier": float(e.capacity_multiplier),
+            "variable_cost_multiplier": float(e.variable_cost_multiplier),
+        }
+
+    def _event_history_to_dto(h: EventHistoryRecord) -> dict:
+        return {
+            "event_id": h.event_id,
+            "template_id": h.template_id,
+            "name": h.name,
+            "event_type": h.event_type,
+            "scope": h.scope,
+            "target_id": h.target_id,
+            "start_day": int(h.start_day),
+            "end_day": int(h.end_day),
+            "created_day": int(h.created_day),
+            "intensity": float(h.intensity),
+            "store_closed": bool(h.store_closed),
+            "traffic_multiplier": float(h.traffic_multiplier),
+            "conversion_multiplier": float(h.conversion_multiplier),
+            "capacity_multiplier": float(h.capacity_multiplier),
+            "variable_cost_multiplier": float(h.variable_cost_multiplier),
+        }
+
+    def _coord_for_station(s: Station) -> tuple[float, float]:
+        x = float(getattr(s, "map_x", 0.0) or 0.0)
+        y = float(getattr(s, "map_y", 0.0) or 0.0)
+        if x > 0 and y > 0:
+            return x, y
+        # Fallback to deterministic pseudo coordinates in [20, 80].
+        import zlib
+
+        sid = str(getattr(s, "station_id", "") or "")
+        hx = int(zlib.crc32(sid.encode("utf-8")) & 0xFFFFFFFF)
+        hy = int(zlib.crc32((sid + "_y").encode("utf-8")) & 0xFFFFFFFF)
+        return 20.0 + float(hx % 61), 20.0 + float(hy % 61)
+
+    def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
+        dx = float(a[0]) - float(b[0])
+        dy = float(a[1]) - float(b[1])
+        return float(math.sqrt(dx * dx + dy * dy))
+
+    def _road_proxy_dist(sa: Station, sb: Station, a: tuple[float, float], b: tuple[float, float]) -> float:
+        """Road-reachability proxy distance.
+
+        This is a lightweight approximation before integrating real OSM road graph:
+        - base geometric distance
+        - city/district boundary penalties
+        - station-type friction
+        - average traffic volatility as congestion factor
+        """
+
+        base = _dist(a, b)
+        penalty = 1.0
+
+        city_a = str(getattr(sa, "city", "") or "").strip().lower()
+        city_b = str(getattr(sb, "city", "") or "").strip().lower()
+        if city_a and city_b and city_a != city_b:
+            penalty += 0.35
+
+        dist_a = str(getattr(sa, "district", "") or "").strip().lower()
+        dist_b = str(getattr(sb, "district", "") or "").strip().lower()
+        if dist_a and dist_b and dist_a != dist_b:
+            penalty += 0.18
+
+        st_a = str(getattr(sa, "station_type", "") or "").strip().lower()
+        st_b = str(getattr(sb, "station_type", "") or "").strip().lower()
+        if ("高速" in st_a) or ("高速" in st_b):
+            penalty += 0.12
+
+        vol = (
+            max(0.0, float(getattr(sa, "traffic_volatility", 0.0) or 0.0))
+            + max(0.0, float(getattr(sb, "traffic_volatility", 0.0) or 0.0))
+        ) / 2.0
+        penalty += min(0.2, vol)
+
+        return float(base * max(1.0, penalty))
+
+    def _station_distance(
+        sa: Station,
+        sb: Station,
+        a: tuple[float, float],
+        b: tuple[float, float],
+        distance_mode: str,
+    ) -> float:
+        mode = str(distance_mode or "euclidean").strip().lower()
+        if mode == "road_proxy":
+            return _road_proxy_dist(sa, sb, a, b)
+        return _dist(a, b)
+
+    def _build_station_graph(state: GameState, station_points: dict[str, tuple[float, float]], k_neighbors: int = 3) -> dict[str, list[tuple[str, float]]]:
+        stations = list(state.stations.values())
+        k = max(1, min(10, int(k_neighbors)))
+        graph: dict[str, list[tuple[str, float]]] = {}
+        for s in stations:
+            sid = str(s.station_id)
+            graph.setdefault(sid, [])
+
+        for s in stations:
+            sid = str(s.station_id)
+            p = station_points.get(sid)
+            if p is None:
+                continue
+            dists: list[tuple[float, str]] = []
+            for t in stations:
+                tid = str(t.station_id)
+                if tid == sid:
+                    continue
+                p2 = station_points.get(tid)
+                if p2 is None:
+                    continue
+                w = _road_proxy_dist(s, t, p, p2)
+                dists.append((w, tid))
+            dists.sort(key=lambda x: x[0])
+            for w, tid in dists[:k]:
+                graph[sid].append((tid, float(w)))
+                graph.setdefault(tid, []).append((sid, float(w)))
+        return graph
+
+    def _graph_shortest_dist(graph: dict[str, list[tuple[str, float]]], src: str, dst: str) -> float:
+        if src == dst:
+            return 0.0
+        if src not in graph or dst not in graph:
+            return 9999.0
+        pq: list[tuple[float, str]] = [(0.0, src)]
+        seen: dict[str, float] = {src: 0.0}
+        while pq:
+            dist_u, u = heapq.heappop(pq)
+            if u == dst:
+                return float(dist_u)
+            if dist_u > float(seen.get(u, 9999.0)):
+                continue
+            for v, w in graph.get(u, []):
+                nd = float(dist_u) + float(w)
+                if nd < float(seen.get(v, 9999.0)):
+                    seen[v] = nd
+                    heapq.heappush(pq, (nd, v))
+        return 9999.0
+
+    def _site_recommendations(
+        state: GameState,
+        top_k: int,
+        radius: float,
+        distance_mode: str = "euclidean",
+        graph_k_neighbors: int = 3,
+    ) -> list[dict]:
+        open_store_station_ids: set[str] = set()
+        for st in state.stores.values():
+            if str(getattr(st, "status", "")) == "open":
+                open_store_station_ids.add(str(getattr(st, "station_id", "") or ""))
+
+        avg_conv = 0.0
+        conv_n = 0
+        for st in state.stores.values():
+            if str(getattr(st, "status", "")) == "open":
+                avg_conv += max(0.0, float(getattr(st, "traffic_conversion_rate", 1.0) or 0.0))
+                conv_n += 1
+        avg_conv = (avg_conv / float(conv_n)) if conv_n > 0 else 1.0
+
+        station_points: dict[str, tuple[float, float]] = {sid: _coord_for_station(s) for sid, s in state.stations.items()}
+        mode = str(distance_mode or "euclidean").strip().lower()
+        station_graph = _build_station_graph(state, station_points, k_neighbors=graph_k_neighbors) if mode == "road_graph" else {}
+
+        rows: list[dict] = []
+        for sid, s in state.stations.items():
+            pos = station_points[sid]
+            demand = max(0.0, float(getattr(s, "fuel_vehicles_per_day", 0))) + 0.4 * max(
+                0.0, float(getattr(s, "visitor_vehicles_per_day", 0))
+            )
+
+            nearest_open_dist = 9999.0
+            reachable = False
+            for osid in open_store_station_ids:
+                p2 = station_points.get(osid)
+                if p2 is None:
+                    continue
+                s2 = state.stations.get(osid)
+                if s2 is None:
+                    continue
+                if mode == "road_graph":
+                    d = _graph_shortest_dist(station_graph, sid, osid)
+                else:
+                    d = _station_distance(s, s2, pos, p2, distance_mode=mode)
+                if d < 9999.0:
+                    reachable = True
+                if d < nearest_open_dist:
+                    nearest_open_dist = d
+
+            covered = nearest_open_dist <= radius
+            covered_ratio = max(0.0, 1.0 - (nearest_open_dist / max(0.1, radius))) if covered else 0.0
+            uncovered_demand = demand * (1.0 - covered_ratio)
+
+            demand_component = uncovered_demand * avg_conv
+            coverage_component = (1.0 - covered_ratio)
+            base_score = demand_component
+            # Penalize opening on a station that already has an open store.
+            if sid in open_store_station_ids:
+                base_score *= 0.35
+
+            has_real_coord = bool(float(getattr(s, "map_x", 0.0) or 0.0) > 0 and float(getattr(s, "map_y", 0.0) or 0.0) > 0)
+            confidence = 1.0
+            if not has_real_coord:
+                confidence -= 0.25
+            if mode == "road_graph" and not reachable and open_store_station_ids:
+                confidence -= 0.35
+            confidence = max(0.2, min(1.0, confidence))
+
+            rows.append(
+                {
+                    "station_id": sid,
+                    "station_name": str(getattr(s, "name", sid) or sid),
+                    "city": str(getattr(s, "city", "") or ""),
+                    "district": str(getattr(s, "district", "") or ""),
+                    "provider": str(getattr(s, "provider", "") or ""),
+                    "demand_index": float(demand),
+                    "nearest_open_distance": float(round(nearest_open_dist, 3)),
+                    "covered_by_existing": bool(covered),
+                    "uncovered_demand": float(round(uncovered_demand, 3)),
+                    "recommendation_score": float(round(base_score, 3)),
+                    "distance_confidence": float(round(confidence, 3)),
+                    "already_has_open_store": bool(sid in open_store_station_ids),
+                    "score_breakdown": {
+                        "demand_component": float(round(demand_component, 3)),
+                        "coverage_component": float(round(coverage_component, 3)),
+                    },
+                }
+            )
+
+        rows.sort(key=lambda x: float(x.get("recommendation_score") or 0.0), reverse=True)
+        return rows[: max(1, int(top_k))]
+
+    def _apply_station_patch(state: GameState, patch: dict) -> None:
+        sid = str((patch or {}).get("station_id") or "").strip()
+        if not sid:
+            return
+        s = state.stations.get(sid)
+        if not s:
+            return
+        if "fuel_vehicles_per_day" in patch:
+            s.fuel_vehicles_per_day = max(0, int(patch.get("fuel_vehicles_per_day") or 0))
+        if "visitor_vehicles_per_day" in patch:
+            s.visitor_vehicles_per_day = max(0, int(patch.get("visitor_vehicles_per_day") or 0))
+        if "traffic_volatility" in patch:
+            s.traffic_volatility = max(0.0, min(1.0, float(patch.get("traffic_volatility") or 0.0)))
+
+    def _apply_store_patch(state: GameState, patch: dict) -> None:
+        sid = str((patch or {}).get("store_id") or "").strip()
+        if not sid:
+            return
+        st = state.stores.get(sid)
+        if not st:
+            return
+        if "traffic_conversion_rate" in patch:
+            st.traffic_conversion_rate = max(0.0, float(patch.get("traffic_conversion_rate") or 0.0))
+        if "local_competition_intensity" in patch:
+            st.local_competition_intensity = max(0.0, min(1.0, float(patch.get("local_competition_intensity") or 0.0)))
+        if "attractiveness_index" in patch:
+            st.attractiveness_index = max(0.5, min(1.5, float(patch.get("attractiveness_index") or 1.0)))
+        if "fixed_overhead_per_day" in patch:
+            st.fixed_overhead_per_day = max(0.0, float(patch.get("fixed_overhead_per_day") or 0.0))
+
+    def _simulate_scenario_metrics(base_state: GameState, days: int, seed: int | None, scenario: dict | None = None) -> dict:
+        st = copy.deepcopy(base_state)
+        if seed is not None:
+            st.rng_seed = int(seed)
+            st.rng_state = None
+
+        scenario = scenario or {}
+        for p in (scenario.get("station_patches") or []):
+            if isinstance(p, dict):
+                _apply_station_patch(st, p)
+        for p in (scenario.get("store_patches") or []):
+            if isinstance(p, dict):
+                _apply_store_patch(st, p)
+
+        total_revenue = 0.0
+        total_profit = 0.0
+        total_cashflow = 0.0
+        total_orders = 0
+
+        for _ in range(max(1, int(days))):
+            dr = simulate_day(st, cfg)
+            total_revenue += float(getattr(dr, "total_revenue", 0.0) or 0.0)
+            total_profit += float(getattr(dr, "total_operating_profit", 0.0) or 0.0)
+            total_cashflow += float(getattr(dr, "total_net_cashflow", 0.0) or 0.0)
+            for sr in getattr(dr, "store_results", []) or []:
+                total_orders += int(sum((getattr(sr, "orders_by_service", {}) or {}).values()))
+
+        return {
+            "days": int(days),
+            "end_day": int(st.day),
+            "end_cash": float(st.cash),
+            "total_revenue": float(round(total_revenue, 4)),
+            "total_operating_profit": float(round(total_profit, 4)),
+            "total_net_cashflow": float(round(total_cashflow, 4)),
+            "avg_daily_orders": float(round(total_orders / float(max(1, int(days))), 4)),
+            "open_store_count": int(sum(1 for x in st.stores.values() if str(getattr(x, "status", "")) == "open")),
+        }
+
     # -------------------- JSON API (for the React frontend) --------------------
+
+    def _state_to_dto(state: GameState) -> dict:
+        return {
+            "day": state.day,
+            "cash": state.cash,
+            "stations": [_station_to_dto(s) for s in state.stations.values()],
+            "stores": [_store_to_dto(s) for s in state.stores.values()],
+            "ledger": _read_ledger_entries(limit=200),
+            "events": {
+                "rng_seed": int(getattr(state, "rng_seed", 0) or 0),
+                "templates": [_event_template_to_dto(t) for t in getattr(state, "event_templates", {}).values()],
+                "active": [_active_event_to_dto(e) for e in getattr(state, "active_events", [])],
+                "history": [_event_history_to_dto(h) for h in getattr(state, "event_history", [])][-500:],
+            },
+        }
 
     @app.get("/api/state")
     def api_state():
         with _lock:
             state = _ensure_state()
-            dto = {
-                "day": state.day,
-                "cash": state.cash,
-                "stations": [_station_to_dto(s) for s in state.stations.values()],
-                "stores": [_store_to_dto(s) for s in state.stores.values()],
-                "ledger": _read_ledger_entries(limit=200),
-            }
+            dto = _state_to_dto(state)
         return dto
+
+    @app.get("/api/events")
+    def api_events():
+        with _lock:
+            state = _ensure_state()
+            return {
+                "rng_seed": int(getattr(state, "rng_seed", 0) or 0),
+                "templates": [_event_template_to_dto(t) for t in getattr(state, "event_templates", {}).values()],
+                "active": [_active_event_to_dto(e) for e in getattr(state, "active_events", [])],
+                "history": [_event_history_to_dto(h) for h in getattr(state, "event_history", [])][-500:],
+            }
+
+    @app.get("/api/site-recommendations")
+    def api_site_recommendations(
+        top_k: int = 10,
+        radius: float = 15.0,
+        distance_mode: str = "road_proxy",
+        graph_k_neighbors: int = 3,
+    ):
+        mode = str(distance_mode or "road_proxy").strip().lower()
+        if mode not in {"euclidean", "road_proxy", "road_graph"}:
+            mode = "road_proxy"
+        with _lock:
+            state = _ensure_state()
+            recs = _site_recommendations(
+                state,
+                top_k=max(1, min(100, int(top_k))),
+                radius=max(1.0, float(radius)),
+                distance_mode=mode,
+                graph_k_neighbors=max(1, min(10, int(graph_k_neighbors))),
+            )
+        return {
+            "top_k": max(1, min(100, int(top_k))),
+            "radius": max(1.0, float(radius)),
+            "distance_mode": mode,
+            "graph_k_neighbors": max(1, min(10, int(graph_k_neighbors))),
+            "recommendations": recs,
+        }
+
+    @app.post("/api/scenarios/compare")
+    def api_scenarios_compare(payload: dict = Body(default={})):
+        days = max(1, min(3650, int(payload.get("days", 30) or 30)))
+        seed_raw = payload.get("seed", None)
+        seed = int(seed_raw) if seed_raw is not None else None
+        scenarios = payload.get("scenarios") or []
+        if not isinstance(scenarios, list):
+            return {"error": "scenarios must be a list"}
+
+        with _lock:
+            state = _ensure_state()
+            baseline = _simulate_scenario_metrics(state, days=days, seed=seed, scenario=None)
+
+            out = []
+            for idx, sc in enumerate(scenarios):
+                if not isinstance(sc, dict):
+                    continue
+                name = str(sc.get("name") or f"scenario_{idx + 1}")
+                m = _simulate_scenario_metrics(state, days=days, seed=seed, scenario=sc)
+                out.append(
+                    {
+                        "name": name,
+                        "metrics": m,
+                        "delta_vs_baseline": {
+                            "total_revenue": float(round(m["total_revenue"] - baseline["total_revenue"], 4)),
+                            "total_operating_profit": float(
+                                round(m["total_operating_profit"] - baseline["total_operating_profit"], 4)
+                            ),
+                            "total_net_cashflow": float(
+                                round(m["total_net_cashflow"] - baseline["total_net_cashflow"], 4)
+                            ),
+                            "avg_daily_orders": float(round(m["avg_daily_orders"] - baseline["avg_daily_orders"], 4)),
+                        },
+                    }
+                )
+
+        return {
+            "days": days,
+            "seed": seed,
+            "baseline": baseline,
+            "scenarios": out,
+        }
+
+    @app.post("/api/events/seed")
+    def api_events_set_seed(payload: dict = Body(default={})):
+        seed = int(payload.get("seed", 0) or 0)
+        with _lock:
+            state = _ensure_state()
+            state.rng_seed = int(seed)
+            state.rng_state = None
+            save_state(state)
+        return api_state()
+
+    @app.post("/api/event-templates")
+    def api_event_template_upsert(payload: dict = Body(default={})):
+        with _lock:
+            state = _ensure_state()
+            tid = str(payload.get("template_id") or "").strip() or f"tmpl_{uuid.uuid4().hex[:8]}"
+            t = EventTemplate(
+                template_id=tid,
+                name=str(payload.get("name") or tid),
+                event_type=str(payload.get("event_type") or "other"),
+            )
+            # Optional fields
+            t.enabled = bool(payload.get("enabled", True))
+            t.daily_probability = float(payload.get("daily_probability", 0.0) or 0.0)
+            t.duration_days_min = int(payload.get("duration_days_min", 1) or 1)
+            t.duration_days_max = int(payload.get("duration_days_max", t.duration_days_min) or t.duration_days_min)
+            t.cooldown_days = int(payload.get("cooldown_days", 0) or 0)
+            t.intensity_min = float(payload.get("intensity_min", 0.3) or 0.0)
+            t.intensity_max = float(payload.get("intensity_max", 1.0) or 0.0)
+            t.scope = str(payload.get("scope", "store") or "store")
+            t.target_strategy = str(payload.get("target_strategy", "random_one") or "random_one")
+            t.store_closed = bool(payload.get("store_closed", False))
+            t.traffic_multiplier_min = float(payload.get("traffic_multiplier_min", 1.0) or 0.0)
+            t.traffic_multiplier_max = float(payload.get("traffic_multiplier_max", 1.0) or 0.0)
+            t.conversion_multiplier_min = float(payload.get("conversion_multiplier_min", 1.0) or 0.0)
+            t.conversion_multiplier_max = float(payload.get("conversion_multiplier_max", 1.0) or 0.0)
+            t.capacity_multiplier_min = float(payload.get("capacity_multiplier_min", 1.0) or 0.0)
+            t.capacity_multiplier_max = float(payload.get("capacity_multiplier_max", 1.0) or 0.0)
+            t.variable_cost_multiplier_min = float(payload.get("variable_cost_multiplier_min", 1.0) or 0.0)
+            t.variable_cost_multiplier_max = float(payload.get("variable_cost_multiplier_max", 1.0) or 0.0)
+            state.event_templates[tid] = t
+            save_state(state)
+        return api_state()
+
+    @app.delete("/api/event-templates/{template_id}")
+    def api_event_template_delete(template_id: str):
+        with _lock:
+            state = _ensure_state()
+            if template_id in state.event_templates:
+                del state.event_templates[template_id]
+                save_state(state)
+        return api_state()
+
+    @app.post("/api/events/inject")
+    def api_event_inject(payload: dict = Body(default={})):
+        template_id = str(payload.get("template_id") or "").strip()
+        scope = str(payload.get("scope") or "store").strip()
+        target_id = str(payload.get("target_id") or "").strip()
+        start_day = int(payload.get("start_day") or 0)
+        duration_days = int(payload.get("duration_days") or 1)
+        intensity = payload.get("intensity", None)
+        intensity_f = float(intensity) if intensity is not None else None
+
+        with _lock:
+            state = _ensure_state()
+            if start_day <= 0:
+                start_day = int(state.day)
+            inject_event_from_template(
+                state,
+                template_id=template_id,
+                scope=scope,
+                target_id=target_id,
+                start_day=start_day,
+                duration_days=max(1, duration_days),
+                intensity=intensity_f,
+            )
+            save_state(state)
+        return api_state()
 
     @app.post("/api/simulate")
     def api_simulate(payload: dict = Body(default={})):  # {days:int}
@@ -649,13 +1213,7 @@ def create_app() -> FastAPI:
                 append_ledger_csv(last)
                 save_snapshot(state)
             save_state(state)
-            dto = {
-                "day": state.day,
-                "cash": state.cash,
-                "stations": [_station_to_dto(s) for s in state.stations.values()],
-                "stores": [_store_to_dto(s) for s in state.stores.values()],
-                "ledger": _read_ledger_entries(limit=200),
-            }
+            dto = _state_to_dto(state)
         return dto
 
     @app.post("/api/rollback")
@@ -673,13 +1231,7 @@ def create_app() -> FastAPI:
             save_state(state2)
             # Truncate ledger to match target day (keep day < target_day)
             truncate_ledger_before_day(target_day)
-            dto = {
-                "day": state2.day,
-                "cash": state2.cash,
-                "stations": [_station_to_dto(s) for s in state2.stations.values()],
-                "stores": [_store_to_dto(s) for s in state2.stores.values()],
-                "ledger": _read_ledger_entries(limit=200),
-            }
+            dto = _state_to_dto(state2)
         return dto
 
     @app.post("/api/reset")
@@ -687,13 +1239,7 @@ def create_app() -> FastAPI:
         with _lock:
             reset_data_files()
             state = _ensure_state()
-            dto = {
-                "day": state.day,
-                "cash": state.cash,
-                "stations": [_station_to_dto(s) for s in state.stations.values()],
-                "stores": [_store_to_dto(s) for s in state.stores.values()],
-                "ledger": _read_ledger_entries(limit=200),
-            }
+            dto = _state_to_dto(state)
         return dto
 
     @app.post("/api/stations")
@@ -788,6 +1334,10 @@ def create_app() -> FastAPI:
             st.build_days_total = build_days
             st.operation_start_day = max(1, int(payload.get("operation_start_day") or state.day))
             st.traffic_conversion_rate = float(payload.get("traffic_conversion_rate") or 1.0)
+            st.local_competition_intensity = max(
+                0.0, min(1.0, float(payload.get("local_competition_intensity", 0.0) or 0.0))
+            )
+            st.attractiveness_index = max(0.5, min(1.5, float(payload.get("attractiveness_index", 1.0) or 1.0)))
             st.capex_total = capex_total
             st.capex_useful_life_days = capex_life
 
@@ -839,6 +1389,46 @@ def create_app() -> FastAPI:
                 st.operation_start_day = max(1, int(payload.get("operation_start_day") or 1))
             if "traffic_conversion_rate" in payload:
                 st.traffic_conversion_rate = max(0.0, float(payload.get("traffic_conversion_rate") or 0.0))
+            if "local_competition_intensity" in payload:
+                st.local_competition_intensity = max(
+                    0.0, min(1.0, float(payload.get("local_competition_intensity") or 0.0))
+                )
+            if "attractiveness_index" in payload:
+                st.attractiveness_index = max(0.5, min(1.5, float(payload.get("attractiveness_index") or 1.0)))
+            if "auto_replenishment_enabled" in payload:
+                st.auto_replenishment_enabled = bool(payload.get("auto_replenishment_enabled"))
+
+            # mitigation (nested patch)
+            m = payload.get("mitigation")
+            if isinstance(m, dict):
+                mit = getattr(st, "mitigation", None)
+                if mit is not None:
+                    if "use_emergency_power" in m:
+                        mit.use_emergency_power = bool(m.get("use_emergency_power"))
+                    if "emergency_capacity_multiplier" in m:
+                        mit.emergency_capacity_multiplier = max(0.0, float(m.get("emergency_capacity_multiplier") or 0.0))
+                    if "emergency_variable_cost_multiplier" in m:
+                        mit.emergency_variable_cost_multiplier = max(
+                            0.0, float(m.get("emergency_variable_cost_multiplier") or 0.0)
+                        )
+                    if "emergency_daily_cost" in m:
+                        mit.emergency_daily_cost = max(0.0, float(m.get("emergency_daily_cost") or 0.0))
+
+                    if "use_promo_boost" in m:
+                        mit.use_promo_boost = bool(m.get("use_promo_boost"))
+                    if "promo_traffic_boost" in m:
+                        mit.promo_traffic_boost = max(0.0, float(m.get("promo_traffic_boost") or 0.0))
+                    if "promo_conversion_boost" in m:
+                        mit.promo_conversion_boost = max(0.0, float(m.get("promo_conversion_boost") or 0.0))
+                    if "promo_daily_cost" in m:
+                        mit.promo_daily_cost = max(0.0, float(m.get("promo_daily_cost") or 0.0))
+
+                    if "use_overtime_capacity" in m:
+                        mit.use_overtime_capacity = bool(m.get("use_overtime_capacity"))
+                    if "overtime_capacity_boost" in m:
+                        mit.overtime_capacity_boost = max(0.0, float(m.get("overtime_capacity_boost") or 0.0))
+                    if "overtime_daily_cost" in m:
+                        mit.overtime_daily_cost = max(0.0, float(m.get("overtime_daily_cost") or 0.0))
 
             if "capex_total" in payload:
                 st.capex_total = float(payload.get("capex_total") or 0.0)
@@ -885,6 +1475,53 @@ def create_app() -> FastAPI:
                 qty=float(payload.get("qty") or 0.0),
             )
             save_state(state)
+        return api_state()
+
+    @app.post("/api/stores/{store_id}/replenishment/rules")
+    def api_store_replenishment_rule_upsert(store_id: str, payload: dict = Body(...)):
+        with _lock:
+            state = _ensure_state()
+            st = state.stores.get(store_id)
+            if not st:
+                return {"error": "store not found"}
+            sku = str(payload.get("sku") or "").strip()
+            if not sku:
+                return {"error": "sku is required"}
+
+            from simgame.models import ReplenishmentRule
+
+            old = (getattr(st, "replenishment_rules", {}) or {}).get(sku)
+            rp_v = payload.get("reorder_point") if "reorder_point" in payload else (getattr(old, "reorder_point", 50.0) if old else 50.0)
+            ss_v = payload.get("safety_stock") if "safety_stock" in payload else (getattr(old, "safety_stock", 80.0) if old else 80.0)
+            ts_v = payload.get("target_stock") if "target_stock" in payload else (getattr(old, "target_stock", 150.0) if old else 150.0)
+            lt_v = payload.get("lead_time_days") if "lead_time_days" in payload else (getattr(old, "lead_time_days", 2) if old else 2)
+            uc_v = payload.get("unit_cost") if "unit_cost" in payload else (getattr(old, "unit_cost", 0.0) if old else 0.0)
+            rule = ReplenishmentRule(
+                sku=sku,
+                name=str(payload.get("name") or (getattr(old, "name", "") if old else "")),
+                enabled=bool(payload.get("enabled") if "enabled" in payload else (getattr(old, "enabled", True) if old else True)),
+                reorder_point=max(0.0, float(rp_v or 0.0)),
+                safety_stock=max(0.0, float(ss_v or 0.0)),
+                target_stock=max(0.0, float(ts_v or 0.0)),
+                lead_time_days=max(0, int(lt_v or 0)),
+                unit_cost=max(0.0, float(uc_v or 0.0)),
+            )
+            if rule.target_stock < rule.safety_stock:
+                rule.target_stock = rule.safety_stock
+            st.replenishment_rules[sku] = rule
+            save_state(state)
+        return api_state()
+
+    @app.delete("/api/stores/{store_id}/replenishment/rules/{sku}")
+    def api_store_replenishment_rule_delete(store_id: str, sku: str):
+        with _lock:
+            state = _ensure_state()
+            st = state.stores.get(store_id)
+            if not st:
+                return {"error": "store not found"}
+            if sku in st.replenishment_rules:
+                del st.replenishment_rules[sku]
+                save_state(state)
         return api_state()
 
     @app.post("/api/stores/{store_id}/assets")

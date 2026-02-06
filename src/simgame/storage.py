@@ -8,10 +8,14 @@ from typing import Any, Dict
 
 from simgame.models import (
     Asset,
+    ActiveEvent,
     BizConfig,
+    EventHistoryRecord,
+    EventTemplate,
     GameState,
     InventoryItem,
     InsuranceBizConfig,
+    MitigationConfig,
     OpexConfig,
     PayrollPlan,
     OnlineBizConfig,
@@ -22,6 +26,8 @@ from simgame.models import (
     Station,
     Store,
     SupplyChainConfig,
+    ReplenishmentRule,
+    PendingInbound,
     UtilitiesConfig,
     UsedCarBizConfig,
 )
@@ -114,10 +120,226 @@ def reset_data_files() -> None:
 def save_state(state: GameState, path: Path | None = None) -> None:
     p = path or state_path()
     payload = {
-        "version": "0.7.0",
+        "version": "0.7.3",
         "state": asdict(state),
     }
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _seed_default_event_templates(state: GameState) -> None:
+    if getattr(state, "event_templates", None):
+        return
+
+    # Minimal starter set; all can be edited in the UI.
+    defaults = [
+        EventTemplate(
+            template_id="weather_rain",
+            name="恶劣天气-下雨",
+            event_type="weather",
+            enabled=True,
+            daily_probability=0.03,
+            duration_days_min=1,
+            duration_days_max=2,
+            cooldown_days=5,
+            intensity_min=0.4,
+            intensity_max=1.0,
+            scope="station",
+            target_strategy="random_one",
+            store_closed=False,
+            traffic_multiplier_min=0.70,
+            traffic_multiplier_max=0.95,
+            conversion_multiplier_min=0.80,
+            conversion_multiplier_max=0.98,
+            capacity_multiplier_min=0.90,
+            capacity_multiplier_max=1.00,
+            variable_cost_multiplier_min=1.00,
+            variable_cost_multiplier_max=1.10,
+        ),
+        EventTemplate(
+            template_id="weather_snow",
+            name="恶劣天气-下雪",
+            event_type="weather",
+            enabled=True,
+            daily_probability=0.015,
+            duration_days_min=1,
+            duration_days_max=3,
+            cooldown_days=10,
+            intensity_min=0.5,
+            intensity_max=1.0,
+            scope="station",
+            target_strategy="random_one",
+            store_closed=False,
+            traffic_multiplier_min=0.50,
+            traffic_multiplier_max=0.85,
+            conversion_multiplier_min=0.65,
+            conversion_multiplier_max=0.95,
+            capacity_multiplier_min=0.80,
+            capacity_multiplier_max=1.00,
+            variable_cost_multiplier_min=1.05,
+            variable_cost_multiplier_max=1.25,
+        ),
+        EventTemplate(
+            template_id="complaint",
+            name="投诉事件",
+            event_type="complaint",
+            enabled=True,
+            daily_probability=0.01,
+            duration_days_min=2,
+            duration_days_max=5,
+            cooldown_days=20,
+            intensity_min=0.3,
+            intensity_max=1.0,
+            scope="store",
+            target_strategy="random_one",
+            store_closed=False,
+            traffic_multiplier_min=0.90,
+            traffic_multiplier_max=1.00,
+            conversion_multiplier_min=0.70,
+            conversion_multiplier_max=0.95,
+            capacity_multiplier_min=1.00,
+            capacity_multiplier_max=1.00,
+            variable_cost_multiplier_min=1.00,
+            variable_cost_multiplier_max=1.00,
+        ),
+        EventTemplate(
+            template_id="power_outage",
+            name="停电",
+            event_type="outage",
+            enabled=True,
+            daily_probability=0.006,
+            duration_days_min=1,
+            duration_days_max=2,
+            cooldown_days=30,
+            intensity_min=0.7,
+            intensity_max=1.0,
+            scope="store",
+            target_strategy="random_one",
+            store_closed=True,
+            traffic_multiplier_min=1.00,
+            traffic_multiplier_max=1.00,
+            conversion_multiplier_min=1.00,
+            conversion_multiplier_max=1.00,
+            capacity_multiplier_min=0.00,
+            capacity_multiplier_max=0.00,
+            variable_cost_multiplier_min=1.00,
+            variable_cost_multiplier_max=1.00,
+        ),
+        EventTemplate(
+            template_id="water_outage",
+            name="停水",
+            event_type="outage",
+            enabled=True,
+            daily_probability=0.006,
+            duration_days_min=1,
+            duration_days_max=2,
+            cooldown_days=30,
+            intensity_min=0.7,
+            intensity_max=1.0,
+            scope="store",
+            target_strategy="random_one",
+            store_closed=False,
+            traffic_multiplier_min=1.00,
+            traffic_multiplier_max=1.00,
+            conversion_multiplier_min=1.00,
+            conversion_multiplier_max=1.00,
+            capacity_multiplier_min=0.40,
+            capacity_multiplier_max=0.85,
+            variable_cost_multiplier_min=1.00,
+            variable_cost_multiplier_max=1.05,
+        ),
+    ]
+    state.event_templates = {t.template_id: t for t in defaults}
+
+
+def _load_event_templates(d: Any) -> Dict[str, EventTemplate]:
+    if not isinstance(d, dict):
+        return {}
+    out: Dict[str, EventTemplate] = {}
+    for tid, raw in d.items():
+        if not isinstance(raw, dict):
+            continue
+        template_id = str(raw.get("template_id", tid) or tid)
+        out[template_id] = EventTemplate(
+            template_id=template_id,
+            name=str(raw.get("name", template_id)),
+            event_type=str(raw.get("event_type", "other")),
+            enabled=bool(raw.get("enabled", True)),
+            daily_probability=float(raw.get("daily_probability", 0.0) or 0.0),
+            duration_days_min=int(raw.get("duration_days_min", 1) or 1),
+            duration_days_max=int(raw.get("duration_days_max", 1) or 1),
+            cooldown_days=int(raw.get("cooldown_days", 0) or 0),
+            intensity_min=float(raw.get("intensity_min", 0.3) or 0.0),
+            intensity_max=float(raw.get("intensity_max", 1.0) or 0.0),
+            scope=str(raw.get("scope", "store") or "store"),
+            target_strategy=str(raw.get("target_strategy", "random_one") or "random_one"),
+            store_closed=bool(raw.get("store_closed", False)),
+            traffic_multiplier_min=float(raw.get("traffic_multiplier_min", 1.0) or 0.0),
+            traffic_multiplier_max=float(raw.get("traffic_multiplier_max", 1.0) or 0.0),
+            conversion_multiplier_min=float(raw.get("conversion_multiplier_min", 1.0) or 0.0),
+            conversion_multiplier_max=float(raw.get("conversion_multiplier_max", 1.0) or 0.0),
+            capacity_multiplier_min=float(raw.get("capacity_multiplier_min", 1.0) or 0.0),
+            capacity_multiplier_max=float(raw.get("capacity_multiplier_max", 1.0) or 0.0),
+            variable_cost_multiplier_min=float(raw.get("variable_cost_multiplier_min", 1.0) or 0.0),
+            variable_cost_multiplier_max=float(raw.get("variable_cost_multiplier_max", 1.0) or 0.0),
+        )
+    return out
+
+
+def _load_active_events(d: Any) -> list[ActiveEvent]:
+    if not isinstance(d, list):
+        return []
+    out: list[ActiveEvent] = []
+    for raw in d:
+        if not isinstance(raw, dict):
+            continue
+        out.append(
+            ActiveEvent(
+                event_id=str(raw.get("event_id", "")),
+                template_id=str(raw.get("template_id", "")),
+                name=str(raw.get("name", "")),
+                event_type=str(raw.get("event_type", "other")),
+                scope=str(raw.get("scope", "store")),
+                target_id=str(raw.get("target_id", "")),
+                start_day=int(raw.get("start_day", 0) or 0),
+                end_day=int(raw.get("end_day", 0) or 0),
+                intensity=float(raw.get("intensity", 0.0) or 0.0),
+                store_closed=bool(raw.get("store_closed", False)),
+                traffic_multiplier=float(raw.get("traffic_multiplier", 1.0) or 1.0),
+                conversion_multiplier=float(raw.get("conversion_multiplier", 1.0) or 1.0),
+                capacity_multiplier=float(raw.get("capacity_multiplier", 1.0) or 1.0),
+                variable_cost_multiplier=float(raw.get("variable_cost_multiplier", 1.0) or 1.0),
+            )
+        )
+    return out
+
+
+def _load_event_history(d: Any) -> list[EventHistoryRecord]:
+    if not isinstance(d, list):
+        return []
+    out: list[EventHistoryRecord] = []
+    for raw in d:
+        if not isinstance(raw, dict):
+            continue
+        out.append(
+            EventHistoryRecord(
+                event_id=str(raw.get("event_id", "")),
+                template_id=str(raw.get("template_id", "")),
+                name=str(raw.get("name", "")),
+                event_type=str(raw.get("event_type", "other")),
+                scope=str(raw.get("scope", "store")),
+                target_id=str(raw.get("target_id", "")),
+                start_day=int(raw.get("start_day", 0) or 0),
+                end_day=int(raw.get("end_day", 0) or 0),
+                created_day=int(raw.get("created_day", 0) or 0),
+                intensity=float(raw.get("intensity", 0.0) or 0.0),
+                store_closed=bool(raw.get("store_closed", False)),
+                traffic_multiplier=float(raw.get("traffic_multiplier", 1.0) or 1.0),
+                conversion_multiplier=float(raw.get("conversion_multiplier", 1.0) or 1.0),
+                capacity_multiplier=float(raw.get("capacity_multiplier", 1.0) or 1.0),
+                variable_cost_multiplier=float(raw.get("variable_cost_multiplier", 1.0) or 1.0),
+            )
+        )
+    return out
 
 
 def _load_biz_config(d: Any) -> BizConfig:
@@ -188,6 +410,13 @@ def load_state(path: Path | None = None) -> GameState:
     d = payload.get("state", {})
 
     state = GameState(day=int(d.get("day", 1)), cash=float(d.get("cash", 0.0)))
+    state.rng_seed = int(d.get("rng_seed", getattr(state, "rng_seed", 20260101)) or 20260101)
+    state.rng_state = d.get("rng_state", None)
+    state.event_templates = _load_event_templates(d.get("event_templates"))
+    state.active_events = _load_active_events(d.get("active_events"))
+    state.event_history = _load_event_history(d.get("event_history"))
+    state.event_cooldowns = {str(k): int(v) for k, v in (d.get("event_cooldowns") or {}).items()}
+    _seed_default_event_templates(state)
 
     # Stations
     for sid, sd in (d.get("stations") or {}).items():
@@ -214,6 +443,55 @@ def load_state(path: Path | None = None) -> GameState:
         )
         store.biz_config = _load_biz_config(st_d.get("biz_config"))
         store.opex_config = _load_opex_config(st_d.get("opex_config"))
+        mit_raw = st_d.get("mitigation") if isinstance(st_d.get("mitigation"), dict) else {}
+        store.mitigation = MitigationConfig(
+            use_emergency_power=bool(mit_raw.get("use_emergency_power", False)),
+            emergency_capacity_multiplier=max(0.0, float(mit_raw.get("emergency_capacity_multiplier", 0.60) or 0.0)),
+            emergency_variable_cost_multiplier=max(0.0, float(mit_raw.get("emergency_variable_cost_multiplier", 1.15) or 0.0)),
+            emergency_daily_cost=max(0.0, float(mit_raw.get("emergency_daily_cost", 120.0) or 0.0)),
+            use_promo_boost=bool(mit_raw.get("use_promo_boost", False)),
+            promo_traffic_boost=max(0.0, float(mit_raw.get("promo_traffic_boost", 1.05) or 0.0)),
+            promo_conversion_boost=max(0.0, float(mit_raw.get("promo_conversion_boost", 1.08) or 0.0)),
+            promo_daily_cost=max(0.0, float(mit_raw.get("promo_daily_cost", 80.0) or 0.0)),
+            use_overtime_capacity=bool(mit_raw.get("use_overtime_capacity", False)),
+            overtime_capacity_boost=max(0.0, float(mit_raw.get("overtime_capacity_boost", 1.20) or 0.0)),
+            overtime_daily_cost=max(0.0, float(mit_raw.get("overtime_daily_cost", 100.0) or 0.0)),
+        )
+
+        store.auto_replenishment_enabled = bool(st_d.get("auto_replenishment_enabled", False))
+        store.replenishment_rules = {}
+        rr_raw = st_d.get("replenishment_rules") or {}
+        if isinstance(rr_raw, dict):
+            for sku, r in rr_raw.items():
+                if not isinstance(r, dict):
+                    continue
+                sid = str(r.get("sku", sku) or sku)
+                store.replenishment_rules[sid] = ReplenishmentRule(
+                    sku=sid,
+                    name=str(r.get("name", "") or ""),
+                    enabled=bool(r.get("enabled", True)),
+                    reorder_point=max(0.0, float(r.get("reorder_point", 50.0) or 0.0)),
+                    safety_stock=max(0.0, float(r.get("safety_stock", 80.0) or 0.0)),
+                    target_stock=max(0.0, float(r.get("target_stock", 150.0) or 0.0)),
+                    lead_time_days=max(0, int(r.get("lead_time_days", 2) or 0)),
+                    unit_cost=max(0.0, float(r.get("unit_cost", 0.0) or 0.0)),
+                )
+        store.pending_inbounds = []
+        pi_raw = st_d.get("pending_inbounds") or []
+        if isinstance(pi_raw, list):
+            for p in pi_raw:
+                if not isinstance(p, dict):
+                    continue
+                store.pending_inbounds.append(
+                    PendingInbound(
+                        sku=str(p.get("sku", "") or ""),
+                        name=str(p.get("name", "") or ""),
+                        qty=max(0.0, float(p.get("qty", 0.0) or 0.0)),
+                        unit_cost=max(0.0, float(p.get("unit_cost", 0.0) or 0.0)),
+                        order_day=int(p.get("order_day", 0) or 0),
+                        arrive_day=int(p.get("arrive_day", 0) or 0),
+                    )
+                )
         store.city = str(st_d.get("city", ""))
         store.district = str(st_d.get("district", ""))
         store.provider = str(st_d.get("provider", ""))
@@ -221,6 +499,8 @@ def load_state(path: Path | None = None) -> GameState:
         store.build_days_total = int(st_d.get("build_days_total", 0))
         store.operation_start_day = int(st_d.get("operation_start_day", 1))
         store.traffic_conversion_rate = float(st_d.get("traffic_conversion_rate", 1.0))
+        store.local_competition_intensity = max(0.0, min(1.0, float(st_d.get("local_competition_intensity", 0.0) or 0.0)))
+        store.attractiveness_index = max(0.5, min(1.5, float(st_d.get("attractiveness_index", 1.0) or 1.0)))
         store.labor_hour_price = float(st_d.get("labor_hour_price", 120.0))
         store.construction_days_remaining = int(st_d.get("construction_days_remaining", 0))
         store.capex_total = float(st_d.get("capex_total", 0.0))
@@ -351,6 +631,18 @@ def append_ledger_csv(day_result: Any) -> None:
         "status",
         "fuel_traffic",
         "visitor_traffic",
+        # Random events (applied on the day)
+        "store_closed",
+        "traffic_multiplier",
+        "conversion_multiplier",
+        "capacity_multiplier",
+        "variable_cost_multiplier",
+        "event_summary_json",
+        "mitigation_cost",
+        "mitigation_actions_json",
+        "replenishment_cost",
+        "replenishment_orders_json",
+        "inbound_arrivals_json",
         "revenue",
         "variable_cost",
         "parts_cogs",
@@ -418,6 +710,17 @@ def append_ledger_csv(day_result: Any) -> None:
                     sr.status,
                     sr.fuel_traffic,
                     sr.visitor_traffic,
+                    getattr(sr, "store_closed", False),
+                    getattr(sr, "traffic_multiplier", 1.0),
+                    getattr(sr, "conversion_multiplier", 1.0),
+                    getattr(sr, "capacity_multiplier", 1.0),
+                    getattr(sr, "variable_cost_multiplier", 1.0),
+                    getattr(sr, "event_summary_json", "[]"),
+                    getattr(sr, "mitigation_cost", 0.0),
+                    getattr(sr, "mitigation_actions_json", "[]"),
+                    getattr(sr, "replenishment_cost", 0.0),
+                    getattr(sr, "replenishment_orders_json", "[]"),
+                    getattr(sr, "inbound_arrivals_json", "[]"),
                     sr.revenue,
                     sr.variable_cost,
                     sr.parts_cogs,

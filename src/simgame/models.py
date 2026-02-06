@@ -205,6 +205,115 @@ class OpexConfig:
 
 
 @dataclass
+class MitigationConfig:
+    use_emergency_power: bool = False
+    emergency_capacity_multiplier: float = 0.60
+    emergency_variable_cost_multiplier: float = 1.15
+    emergency_daily_cost: float = 120.0
+
+    use_promo_boost: bool = False
+    promo_traffic_boost: float = 1.05
+    promo_conversion_boost: float = 1.08
+    promo_daily_cost: float = 80.0
+
+    use_overtime_capacity: bool = False
+    overtime_capacity_boost: float = 1.20
+    overtime_daily_cost: float = 100.0
+
+
+@dataclass
+class ReplenishmentRule:
+    sku: str
+    name: str = ""
+    enabled: bool = True
+    reorder_point: float = 50.0
+    safety_stock: float = 80.0
+    target_stock: float = 150.0
+    lead_time_days: int = 2
+    unit_cost: float = 0.0
+
+
+@dataclass
+class PendingInbound:
+    sku: str
+    name: str
+    qty: float
+    unit_cost: float
+    order_day: int
+    arrive_day: int
+
+
+@dataclass
+class EventTemplate:
+    template_id: str
+    name: str
+    event_type: str  # weather|complaint|outage|other
+
+    enabled: bool = True
+    daily_probability: float = 0.01
+
+    duration_days_min: int = 1
+    duration_days_max: int = 3
+    cooldown_days: int = 7
+
+    intensity_min: float = 0.3
+    intensity_max: float = 1.0
+
+    scope: str = "store"  # global|station|store
+    target_strategy: str = "random_one"  # random_one|all
+
+    # Effect ranges. Actual values are derived from sampled intensity.
+    store_closed: bool = False
+    traffic_multiplier_min: float = 1.0
+    traffic_multiplier_max: float = 1.0
+    conversion_multiplier_min: float = 1.0
+    conversion_multiplier_max: float = 1.0
+    capacity_multiplier_min: float = 1.0
+    capacity_multiplier_max: float = 1.0
+    variable_cost_multiplier_min: float = 1.0
+    variable_cost_multiplier_max: float = 1.0
+
+
+@dataclass
+class ActiveEvent:
+    event_id: str
+    template_id: str
+    name: str
+    event_type: str
+    scope: str
+    target_id: str  # "" for global
+
+    start_day: int
+    end_day: int
+
+    intensity: float
+    store_closed: bool
+    traffic_multiplier: float
+    conversion_multiplier: float
+    capacity_multiplier: float
+    variable_cost_multiplier: float
+
+
+@dataclass
+class EventHistoryRecord:
+    event_id: str
+    template_id: str
+    name: str
+    event_type: str
+    scope: str
+    target_id: str
+    start_day: int
+    end_day: int
+    created_day: int
+    intensity: float
+    store_closed: bool
+    traffic_multiplier: float
+    conversion_multiplier: float
+    capacity_multiplier: float
+    variable_cost_multiplier: float
+
+
+@dataclass
 class Store:
     store_id: str
     name: str
@@ -219,6 +328,9 @@ class Store:
     build_days_total: int = 0
     operation_start_day: int = 1
     traffic_conversion_rate: float = 1.0
+    # Competitive environment (P1)
+    local_competition_intensity: float = 0.0  # 0..1, higher means stronger competitor diversion
+    attractiveness_index: float = 1.0  # 0.5..1.5, higher means better conversion/retention
     construction_days_remaining: int = 0
 
     # Labor pricing for "labor revenue proportion" on projects
@@ -241,6 +353,14 @@ class Store:
 
     # Operating expenses
     opex_config: OpexConfig = field(default_factory=OpexConfig)
+
+    # Event mitigation actions
+    mitigation: MitigationConfig = field(default_factory=MitigationConfig)
+
+    # Auto replenishment (P2)
+    auto_replenishment_enabled: bool = False
+    replenishment_rules: Dict[str, ReplenishmentRule] = field(default_factory=dict)
+    pending_inbounds: List[PendingInbound] = field(default_factory=list)
 
     # If true, projects must be fulfilled with inventory parts; otherwise fallback to cost ratio.
     strict_parts: bool = True
@@ -309,6 +429,19 @@ class DayStoreResult:
     cost_rent: float = 0.0
     cost_water: float = 0.0
     cost_elec: float = 0.0
+
+    # Random events (daily applied multipliers)
+    store_closed: bool = False
+    traffic_multiplier: float = 1.0
+    conversion_multiplier: float = 1.0
+    capacity_multiplier: float = 1.0
+    variable_cost_multiplier: float = 1.0
+    event_summary_json: str = "[]"
+    mitigation_cost: float = 0.0
+    mitigation_actions_json: str = "[]"
+    replenishment_cost: float = 0.0
+    replenishment_orders_json: str = "[]"
+    inbound_arrivals_json: str = "[]"
     revenue: float = 0.0
     variable_cost: float = 0.0
     parts_cogs: float = 0.0
@@ -340,6 +473,16 @@ class GameState:
     stations: Dict[str, Station] = field(default_factory=dict)
     stores: Dict[str, Store] = field(default_factory=dict)
     ledger: List[DayResult] = field(default_factory=list)
+
+    # RNG (for deterministic simulation)
+    rng_seed: int = 20260101
+    rng_state: Optional[object] = None
+
+    # Random events system
+    event_templates: Dict[str, EventTemplate] = field(default_factory=dict)
+    active_events: List[ActiveEvent] = field(default_factory=list)
+    event_history: List[EventHistoryRecord] = field(default_factory=list)
+    event_cooldowns: Dict[str, int] = field(default_factory=dict)
 
     def month_day_index(self, month_len: int) -> int:
         # 1..month_len

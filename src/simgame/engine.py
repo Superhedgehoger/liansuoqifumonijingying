@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import json
 import math
 import random
+import zlib
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
-
-try:
-    import numpy as _np  # type: ignore
-except Exception:  # pragma: no cover
-    _np = None
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from simgame.models import (
+    ActiveEvent,
     DayResult,
     DayStoreResult,
+    EventHistoryRecord,
+    EventTemplate,
     GameState,
     InventoryItem,
+    PendingInbound,
+    ReplenishmentRule,
     ServiceLine,
     ServiceProject,
     Store,
@@ -29,36 +31,25 @@ def _clamp01(x: float) -> float:
     return float(x)
 
 
-def _normal(mean: float, std: float) -> float:
+def _normal(mean: float, std: float, rng: random.Random) -> float:
     mu = float(mean)
     sigma = max(0.0, float(std))
     if sigma <= 0:
         return mu
-    if _np is not None:
-        try:
-            return float(_np.random.normal(mu, sigma))
-        except Exception:
-            pass
-    return float(random.gauss(mu, sigma))
+    return float(rng.gauss(mu, sigma))
 
 
-def _poisson(lam: float) -> int:
+def _poisson(lam: float, rng: random.Random) -> int:
     lam_f = max(0.0, float(lam))
     if lam_f <= 0.0:
         return 0
-    if _np is not None:
-        try:
-            return int(_np.random.poisson(lam_f))
-        except Exception:
-            pass
-
     # Knuth algorithm; efficient enough for small lambda.
     L = math.exp(-lam_f)
     k = 0
     p = 1.0
     while p > L:
         k += 1
-        p *= random.random()
+        p *= rng.random()
     return max(0, k - 1)
 
 
@@ -70,7 +61,9 @@ def _supply_chain_reduction_rate(store: Store) -> float:
     return _clamp01(float(getattr(sc, "cost_reduction_rate", 0.0) or 0.0))
 
 
-def simulate_value_added_services(store: Store, day: int, cfg: EngineConfig) -> tuple[float, float, float, float, float, float, int]:
+def simulate_value_added_services(
+    store: Store, day: int, cfg: EngineConfig, rng: random.Random
+) -> tuple[float, float, float, float, float, float, int]:
     """Return (rev_online, gp_online, rev_insurance, gp_insurance, rev_used_car, gp_used_car, used_car_count)."""
 
     bc = getattr(store, "biz_config", None)
@@ -85,7 +78,18 @@ def simulate_value_added_services(store: Store, day: int, cfg: EngineConfig) -> 
     # Online business (pure retail)
     online = getattr(bc, "online", None)
     if online and bool(getattr(online, "enabled", False)):
-        orders = int(round(max(0.0, _normal(getattr(online, "daily_orders_mean", 2.0), getattr(online, "daily_orders_std", 0.5)))))
+        orders = int(
+            round(
+                max(
+                    0.0,
+                    _normal(
+                        getattr(online, "daily_orders_mean", 2.0),
+                        getattr(online, "daily_orders_std", 0.5),
+                        rng,
+                    ),
+                )
+            )
+        )
         avg_ticket = max(0.0, float(getattr(online, "avg_ticket", 200.0) or 0.0))
         mr = _clamp01(float(getattr(online, "margin_rate", 0.15) or 0.0))
         rev_online = float(orders) * avg_ticket
@@ -97,7 +101,7 @@ def simulate_value_added_services(store: Store, day: int, cfg: EngineConfig) -> 
         target = max(0.0, float(getattr(ins, "daily_revenue_target", 128.4) or 0.0))
         vol = max(0.0, float(getattr(ins, "volatility", 0.1) or 0.0))
         mr = _clamp01(float(getattr(ins, "margin_rate", 0.20) or 0.0))
-        rev_ins = max(0.0, _normal(target, target * vol))
+        rev_ins = max(0.0, _normal(target, target * vol, rng))
         gp_ins = rev_ins * mr
 
     # Used car brokerage (Poisson)
@@ -106,7 +110,7 @@ def simulate_value_added_services(store: Store, day: int, cfg: EngineConfig) -> 
         month_len = max(1, int(getattr(cfg, "month_len_days", 30) or 30))
         monthly_target = max(0.0, float(getattr(uc, "monthly_deal_target", 1.56) or 0.0))
         lam = monthly_target / float(month_len)
-        cnt_uc = int(_poisson(lam))
+        cnt_uc = int(_poisson(lam, rng))
         if cnt_uc > 0:
             rev_per = max(0.0, float(getattr(uc, "revenue_per_deal", 1200.0) or 0.0))
             gp_per = float(getattr(uc, "profit_per_deal", 600.0) or 0.0)
@@ -158,12 +162,12 @@ class EngineConfig:
     hours_per_staff_per_day: float = 8.0
 
 
-def _int_jitter(base: int, volatility: float) -> int:
+def _int_jitter(base: int, volatility: float, rng: random.Random) -> int:
     v = max(0.0, float(volatility))
     if base <= 0:
         return 0
     delta = int(round(base * v))
-    return max(0, base + random.randint(-delta, delta))
+    return max(0, base + rng.randint(-delta, delta))
 
 
 def _ensure_mtd_order_keys(store: Store) -> None:
@@ -180,7 +184,7 @@ def _role_headcount(store: Store, role: str) -> int:
     return max(0, int(rp.headcount))
 
 
-def _service_effective_capacity(store: Store, line: ServiceLine, cfg: EngineConfig) -> int:
+def _service_effective_capacity(store: Store, line: ServiceLine, cfg: EngineConfig, capacity_multiplier: float = 1.0) -> int:
     cap = max(0, int(line.capacity_per_day))
     if not line.labor_role or line.labor_hours_per_order <= 0:
         return cap
@@ -189,7 +193,311 @@ def _service_effective_capacity(store: Store, line: ServiceLine, cfg: EngineConf
         return 0
     hours = float(hc) * float(cfg.hours_per_staff_per_day)
     derived = int(hours // float(line.labor_hours_per_order))
-    return max(0, min(cap, derived))
+    out = max(0, min(cap, derived))
+    out = int(round(float(out) * max(0.0, float(capacity_multiplier))))
+    return max(0, out)
+
+
+def _to_jsonable(x: object) -> object:
+    if isinstance(x, tuple):
+        return [_to_jsonable(v) for v in x]
+    if isinstance(x, list):
+        return [_to_jsonable(v) for v in x]
+    if isinstance(x, dict):
+        return {str(k): _to_jsonable(v) for k, v in x.items()}
+    return x
+
+
+def _to_tuple(x: object) -> object:
+    if isinstance(x, list):
+        return tuple(_to_tuple(v) for v in x)
+    if isinstance(x, dict):
+        return {k: _to_tuple(v) for k, v in x.items()}
+    return x
+
+
+def _rng_from_state(state: GameState) -> random.Random:
+    rng = random.Random()
+    seed = int(getattr(state, "rng_seed", 20260101) or 20260101)
+    st = getattr(state, "rng_state", None)
+    if st is not None:
+        try:
+            rng.setstate(cast(tuple[Any, ...], _to_tuple(st)))
+            return rng
+        except Exception:
+            pass
+    rng.seed(seed)
+    return rng
+
+
+def _persist_rng_state(state: GameState, rng: random.Random) -> None:
+    try:
+        state.rng_state = _to_jsonable(rng.getstate())
+    except Exception:
+        state.rng_state = None
+
+
+def _stable_u32(s: str) -> int:
+    """Return a stable unsigned 32-bit hash for seeding.
+
+    Python's built-in hash() is randomized per process; avoid it for reproducibility.
+    """
+
+    return int(zlib.crc32(s.encode("utf-8")) & 0xFFFFFFFF)
+
+
+def _event_cooldown_key(template_id: str, scope: str, target_id: str) -> str:
+    return f"{template_id}:{scope}:{target_id}"
+
+
+def _event_is_active_on_day(ev: ActiveEvent, day: int) -> bool:
+    return int(ev.start_day) <= int(day) <= int(ev.end_day)
+
+
+def _apply_severity_range(min_v: float, max_v: float, severity: float, worse_is_lower: bool) -> float:
+    lo = float(min_v)
+    hi = float(max_v)
+    if hi < lo:
+        lo, hi = hi, lo
+    s = _clamp01(float(severity))
+    if worse_is_lower:
+        # 0 -> best (hi), 1 -> worst (lo)
+        return hi - s * (hi - lo)
+    # 0 -> best (lo), 1 -> worst (hi)
+    return lo + s * (hi - lo)
+
+
+def _new_active_event(
+    template: EventTemplate,
+    scope: str,
+    target_id: str,
+    day: int,
+    cfg: EngineConfig,
+    rng: random.Random,
+) -> tuple[ActiveEvent, EventHistoryRecord]:
+    dmin = max(1, int(template.duration_days_min))
+    dmax = max(dmin, int(template.duration_days_max))
+    duration = rng.randint(dmin, dmax)
+
+    imin = float(template.intensity_min)
+    imax = float(template.intensity_max)
+    if imax < imin:
+        imin, imax = imax, imin
+    intensity = float(rng.uniform(imin, imax))
+    severity = _clamp01(intensity)
+
+    traffic_mult = _apply_severity_range(template.traffic_multiplier_min, template.traffic_multiplier_max, severity, True)
+    conv_mult = _apply_severity_range(template.conversion_multiplier_min, template.conversion_multiplier_max, severity, True)
+    cap_mult = _apply_severity_range(template.capacity_multiplier_min, template.capacity_multiplier_max, severity, True)
+    var_cost_mult = _apply_severity_range(
+        template.variable_cost_multiplier_min, template.variable_cost_multiplier_max, severity, False
+    )
+
+    eid = f"EV{int(day):06d}_{rng.getrandbits(32):08x}"
+    start_day = int(day)
+    end_day = int(day) + int(duration) - 1
+
+    ev = ActiveEvent(
+        event_id=eid,
+        template_id=template.template_id,
+        name=template.name,
+        event_type=template.event_type,
+        scope=scope,
+        target_id=str(target_id or ""),
+        start_day=start_day,
+        end_day=end_day,
+        intensity=float(intensity),
+        store_closed=bool(template.store_closed),
+        traffic_multiplier=float(traffic_mult),
+        conversion_multiplier=float(conv_mult),
+        capacity_multiplier=float(cap_mult),
+        variable_cost_multiplier=float(var_cost_mult),
+    )
+    hist = EventHistoryRecord(
+        event_id=eid,
+        template_id=template.template_id,
+        name=template.name,
+        event_type=template.event_type,
+        scope=scope,
+        target_id=str(target_id or ""),
+        start_day=start_day,
+        end_day=end_day,
+        created_day=int(day),
+        intensity=float(intensity),
+        store_closed=bool(template.store_closed),
+        traffic_multiplier=float(traffic_mult),
+        conversion_multiplier=float(conv_mult),
+        capacity_multiplier=float(cap_mult),
+        variable_cost_multiplier=float(var_cost_mult),
+    )
+    return ev, hist
+
+
+def _events_day_start(state: GameState, cfg: EngineConfig, rng: random.Random) -> None:
+    day = int(state.day)
+
+    # Remove expired events
+    state.active_events = [ev for ev in state.active_events if int(ev.end_day) >= day]
+
+    # Trigger new events
+    for tmpl in state.event_templates.values():
+        if not bool(getattr(tmpl, "enabled", False)):
+            continue
+        prob = float(getattr(tmpl, "daily_probability", 0.0) or 0.0)
+        if prob <= 0:
+            continue
+        if rng.random() >= prob:
+            continue
+
+        scope = str(getattr(tmpl, "scope", "store") or "store")
+        strategy = str(getattr(tmpl, "target_strategy", "random_one") or "random_one")
+
+        targets: list[str] = []
+        if scope == "global":
+            targets = [""]
+        elif scope == "station":
+            if not state.stations:
+                continue
+            if strategy == "all":
+                targets = list(state.stations.keys())
+            else:
+                targets = [rng.choice(list(state.stations.keys()))]
+        else:  # store
+            if not state.stores:
+                continue
+            if strategy == "all":
+                targets = list(state.stores.keys())
+            else:
+                targets = [rng.choice(list(state.stores.keys()))]
+
+        for target_id in targets:
+            key = _event_cooldown_key(tmpl.template_id, scope, str(target_id))
+            next_ok = int(state.event_cooldowns.get(key, 1) or 1)
+            if day < next_ok:
+                continue
+            ev, hist = _new_active_event(tmpl, scope=scope, target_id=str(target_id), day=day, cfg=cfg, rng=rng)
+            state.active_events.append(ev)
+            state.event_history.append(hist)
+            # Keep history bounded
+            if len(state.event_history) > 5000:
+                state.event_history = state.event_history[-5000:]
+
+            cd = max(0, int(getattr(tmpl, "cooldown_days", 0) or 0))
+            state.event_cooldowns[key] = int(ev.end_day) + cd + 1
+
+
+def combine_event_effects_for_store(
+    state: GameState, store: Store
+) -> tuple[bool, float, float, float, float, list[dict]]:
+    day = int(state.day)
+    traffic_m = 1.0
+    conv_m = 1.0
+    cap_m = 1.0
+    var_cost_m = 1.0
+    closed = False
+    summary: list[dict] = []
+
+    for ev in state.active_events:
+        if not _event_is_active_on_day(ev, day):
+            continue
+        applies = False
+        if ev.scope == "global":
+            applies = True
+        elif ev.scope == "station":
+            applies = (store.station_id == ev.target_id)
+        elif ev.scope == "store":
+            applies = (store.store_id == ev.target_id)
+
+        if not applies:
+            continue
+
+        closed = closed or bool(ev.store_closed)
+        traffic_m *= float(ev.traffic_multiplier)
+        conv_m *= float(ev.conversion_multiplier)
+        cap_m *= float(ev.capacity_multiplier)
+        var_cost_m *= float(ev.variable_cost_multiplier)
+
+        summary.append(
+            {
+                "event_id": ev.event_id,
+                "template_id": ev.template_id,
+                "name": ev.name,
+                "type": ev.event_type,
+                "scope": ev.scope,
+                "target_id": ev.target_id,
+                "start_day": int(ev.start_day),
+                "end_day": int(ev.end_day),
+                "closed": bool(ev.store_closed),
+                "traffic": float(ev.traffic_multiplier),
+                "conversion": float(ev.conversion_multiplier),
+                "capacity": float(ev.capacity_multiplier),
+                "var_cost": float(ev.variable_cost_multiplier),
+            }
+        )
+
+    # Clamp combined multipliers to avoid runaway.
+    traffic_m = max(0.1, min(2.0, float(traffic_m)))
+    conv_m = max(0.1, min(2.0, float(conv_m)))
+    cap_m = max(0.0, min(2.0, float(cap_m)))
+    var_cost_m = max(0.5, min(5.0, float(var_cost_m)))
+
+    return closed, traffic_m, conv_m, cap_m, var_cost_m, summary
+
+
+def inject_event_from_template(
+    state: GameState,
+    template_id: str,
+    scope: str,
+    target_id: str,
+    start_day: int,
+    duration_days: int,
+    intensity: Optional[float] = None,
+) -> ActiveEvent:
+    tmpl = state.event_templates.get(template_id)
+    if tmpl is None:
+        raise ValueError(f"unknown template_id: {template_id}")
+
+    seed = int(getattr(state, "rng_seed", 20260101) or 20260101)
+    seed ^= int(start_day)
+    seed ^= _stable_u32(str(template_id or ""))
+    seed ^= _stable_u32(str(scope or ""))
+    seed ^= _stable_u32(str(target_id or ""))
+    rr = random.Random(seed)
+    ev, hist = _new_active_event(tmpl, scope=scope, target_id=target_id, day=start_day, cfg=EngineConfig(), rng=rr)
+
+    # Override duration/intensity deterministically.
+    if duration_days > 0:
+        ev.start_day = int(start_day)
+        ev.end_day = int(start_day) + int(duration_days) - 1
+        hist.start_day = ev.start_day
+        hist.end_day = ev.end_day
+    if intensity is not None:
+        sev = _clamp01(float(intensity))
+        ev.intensity = float(intensity)
+        hist.intensity = float(intensity)
+        # Recompute multipliers from template with this severity.
+        ev.traffic_multiplier = _apply_severity_range(tmpl.traffic_multiplier_min, tmpl.traffic_multiplier_max, sev, True)
+        ev.conversion_multiplier = _apply_severity_range(
+            tmpl.conversion_multiplier_min, tmpl.conversion_multiplier_max, sev, True
+        )
+        ev.capacity_multiplier = _apply_severity_range(tmpl.capacity_multiplier_min, tmpl.capacity_multiplier_max, sev, True)
+        ev.variable_cost_multiplier = _apply_severity_range(
+            tmpl.variable_cost_multiplier_min, tmpl.variable_cost_multiplier_max, sev, False
+        )
+        hist.traffic_multiplier = float(ev.traffic_multiplier)
+        hist.conversion_multiplier = float(ev.conversion_multiplier)
+        hist.capacity_multiplier = float(ev.capacity_multiplier)
+        hist.variable_cost_multiplier = float(ev.variable_cost_multiplier)
+
+    state.active_events.append(ev)
+    state.event_history.append(hist)
+    if len(state.event_history) > 5000:
+        state.event_history = state.event_history[-5000:]
+
+    key = _event_cooldown_key(tmpl.template_id, scope, target_id)
+    cd = max(0, int(getattr(tmpl, "cooldown_days", 0) or 0))
+    state.event_cooldowns[key] = int(ev.end_day) + cd + 1
+    return ev
 
 
 def _apply_consumable_limit(
@@ -225,11 +533,11 @@ def _apply_consumable_limit(
     return feasible, used_units * item.unit_cost
 
 
-def _weighted_choice(pairs: List[Tuple[str, float]]) -> str:
+def _weighted_choice(pairs: List[Tuple[str, float]], rng: random.Random) -> str:
     total = sum(max(0.0, float(w)) for _, w in pairs)
     if total <= 0:
         return pairs[0][0]
-    r = random.random() * total
+    r = rng.random() * total
     upto = 0.0
     for k, w in pairs:
         w2 = max(0.0, float(w))
@@ -397,6 +705,8 @@ def _orders_for_store(
     fuel_traffic: int,
     visitor_traffic: int,
     cfg: EngineConfig,
+    conversion_multiplier: float = 1.0,
+    capacity_multiplier: float = 1.0,
 ) -> Dict[str, int]:
     """Compute feasible orders per service line.
 
@@ -422,13 +732,21 @@ def _orders_for_store(
         return {}
 
     raw: Dict[str, float] = {}
+    comp = max(0.0, min(1.0, float(getattr(store, "local_competition_intensity", 0.0) or 0.0)))
+    attract = float(getattr(store, "attractiveness_index", 1.0) or 1.0)
+    attract = max(0.5, min(1.5, attract))
+    # Competitor diversion model (P1):
+    # - stronger competition reduces capture
+    # - store attractiveness partially offsets diversion
+    competition_factor = max(0.2, min(1.5, (1.0 - 0.7 * comp) * attract))
+
     for sid, line in store.service_lines.items():
-        mult = float(getattr(store, "traffic_conversion_rate", 1.0) or 1.0)
+        mult = float(getattr(store, "traffic_conversion_rate", 1.0) or 1.0) * max(0.0, float(conversion_multiplier))
         if mult < 0:
             mult = 0.0
         raw_orders = (
             fuel_traffic * line.conversion_from_fuel + visitor_traffic * line.conversion_from_visitor
-        ) * mult
+        ) * mult * competition_factor
         raw[sid] = max(0.0, float(raw_orders))
 
     raw_total = sum(raw.values())
@@ -442,7 +760,7 @@ def _orders_for_store(
     desired_int: Dict[str, int] = {}
     for sid, line in store.service_lines.items():
         desired = int(round(raw[sid] * scale))
-        eff_cap = _service_effective_capacity(store, line, cfg=cfg)
+        eff_cap = _service_effective_capacity(store, line, cfg=cfg, capacity_multiplier=capacity_multiplier)
         desired = max(0, min(int(eff_cap), desired))
         desired_int[sid] = desired
 
@@ -460,6 +778,7 @@ def _generate_projects_for_service_line(
     line: ServiceLine,
     orders: int,
     parts_cost_reduction_rate: float = 0.0,
+    rng: random.Random | None = None,
 ) -> Tuple[Dict[str, int], float, float, float, Dict[str, float]]:
     """Return (orders_by_project, revenue, parts_cogs, project_variable_cost, parts_cogs_by_project).
 
@@ -486,8 +805,9 @@ def _generate_projects_for_service_line(
     project_variable_cost = 0.0
     parts_cogs_by_project: Dict[str, float] = {}
 
+    rr = rng or random.Random()
     for _ in range(int(orders)):
-        pid = _weighted_choice(line.project_mix)
+        pid = _weighted_choice(line.project_mix, rr)
         counts[pid] = counts.get(pid, 0) + 1
 
     red = _clamp01(float(parts_cost_reduction_rate or 0.0))
@@ -526,7 +846,126 @@ def _generate_projects_for_service_line(
     return counts, revenue, parts_cogs, project_variable_cost, parts_cogs_by_project
 
 
+def _process_pending_inbounds(store: Store, day: int) -> list[dict]:
+    arrivals: list[dict] = []
+    remaining: list[PendingInbound] = []
+    for p in list(getattr(store, "pending_inbounds", []) or []):
+        if int(getattr(p, "arrive_day", 0) or 0) <= int(day):
+            sku = str(getattr(p, "sku", "") or "")
+            if not sku:
+                continue
+            qty = max(0.0, float(getattr(p, "qty", 0.0) or 0.0))
+            if qty <= 0:
+                continue
+            name = str(getattr(p, "name", sku) or sku)
+            unit_cost = max(0.0, float(getattr(p, "unit_cost", 0.0) or 0.0))
+            item = store.inventory.get(sku)
+            if item is None:
+                store.inventory[sku] = InventoryItem(sku=sku, name=name, unit_cost=unit_cost, qty=qty)
+            else:
+                if item.qty + qty > 0:
+                    item.unit_cost = (item.unit_cost * item.qty + unit_cost * qty) / (item.qty + qty)
+                item.qty += qty
+                if name:
+                    item.name = name
+            arrivals.append(
+                {
+                    "sku": sku,
+                    "name": name,
+                    "qty": float(round(qty, 4)),
+                    "unit_cost": float(round(unit_cost, 4)),
+                    "arrive_day": int(day),
+                }
+            )
+        else:
+            remaining.append(p)
+    store.pending_inbounds = remaining
+    return arrivals
+
+
+def _auto_replenish(state: GameState, store: Store, day: int) -> tuple[float, list[dict]]:
+    if not bool(getattr(store, "auto_replenishment_enabled", False)):
+        return 0.0, []
+
+    rules: Dict[str, ReplenishmentRule] = getattr(store, "replenishment_rules", {}) or {}
+    if not rules:
+        return 0.0, []
+
+    total_cost = 0.0
+    orders: list[dict] = []
+    pending: list[PendingInbound] = list(getattr(store, "pending_inbounds", []) or [])
+
+    for sku, rule in rules.items():
+        if not bool(getattr(rule, "enabled", True)):
+            continue
+        sku_s = str(getattr(rule, "sku", sku) or sku)
+        item = store.inventory.get(sku_s)
+        qty_now = float(item.qty if item else 0.0)
+        on_order = 0.0
+        for p in pending:
+            if str(getattr(p, "sku", "") or "") == sku_s:
+                on_order += max(0.0, float(getattr(p, "qty", 0.0) or 0.0))
+
+        reorder_point = max(0.0, float(getattr(rule, "reorder_point", 0.0) or 0.0))
+        safety_stock = max(0.0, float(getattr(rule, "safety_stock", 0.0) or 0.0))
+        target_stock = max(safety_stock, float(getattr(rule, "target_stock", 0.0) or 0.0))
+        effective = qty_now + on_order
+
+        if effective > reorder_point:
+            continue
+
+        need_qty = max(0.0, target_stock - effective)
+        if need_qty <= 0:
+            continue
+
+        unit_cost = max(0.0, float(getattr(rule, "unit_cost", 0.0) or 0.0))
+        if unit_cost <= 0 and item is not None:
+            unit_cost = max(0.0, float(item.unit_cost))
+        if unit_cost <= 0:
+            continue
+
+        est_cost = need_qty * unit_cost
+        actual_cost = min(max(0.0, float(state.cash)), est_cost)
+        if actual_cost <= 0:
+            continue
+        buy_qty = actual_cost / unit_cost
+        if buy_qty <= 0:
+            continue
+
+        lead_days = max(0, int(getattr(rule, "lead_time_days", 0) or 0))
+        arrive_day = int(day) + lead_days
+        inbound = PendingInbound(
+            sku=sku_s,
+            name=str(getattr(rule, "name", "") or (item.name if item else sku_s)),
+            qty=buy_qty,
+            unit_cost=unit_cost,
+            order_day=int(day),
+            arrive_day=arrive_day,
+        )
+        pending.append(inbound)
+        total_cost += actual_cost
+
+        orders.append(
+            {
+                "sku": sku_s,
+                "qty": float(round(buy_qty, 4)),
+                "unit_cost": float(round(unit_cost, 4)),
+                "order_day": int(day),
+                "arrive_day": int(arrive_day),
+                "cash_out": float(round(actual_cost, 4)),
+            }
+        )
+
+    store.pending_inbounds = pending
+    return total_cost, orders
+
+
 def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
+    rng = _rng_from_state(state)
+
+    # Random events: day start settlement
+    _events_day_start(state, cfg=cfg, rng=rng)
+
     is_month_end = state.month_day_index(cfg.month_len_days) == cfg.month_len_days
 
     day_result = DayResult(day=state.day)
@@ -585,14 +1024,82 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
             day_result.total_net_cashflow += sr.net_cashflow
             continue
 
+        # Event effects for the day (before traffic/orders)
+        (
+            sr.store_closed,
+            sr.traffic_multiplier,
+            sr.conversion_multiplier,
+            sr.capacity_multiplier,
+            sr.variable_cost_multiplier,
+            _ev_summary,
+        ) = combine_event_effects_for_store(state, store)
+        sr.event_summary_json = json.dumps(_ev_summary, ensure_ascii=False)
+
+        # Event mitigation actions
+        mitigation_actions: list[dict] = []
+        mit = getattr(store, "mitigation", None)
+        if mit is not None:
+            if sr.store_closed and bool(getattr(mit, "use_emergency_power", False)):
+                sr.store_closed = False
+                sr.capacity_multiplier = max(
+                    float(sr.capacity_multiplier), float(getattr(mit, "emergency_capacity_multiplier", 0.60) or 0.60)
+                )
+                sr.variable_cost_multiplier *= max(
+                    0.0, float(getattr(mit, "emergency_variable_cost_multiplier", 1.15) or 1.15)
+                )
+                c = max(0.0, float(getattr(mit, "emergency_daily_cost", 120.0) or 0.0))
+                sr.mitigation_cost += c
+                mitigation_actions.append({"action": "emergency_power", "cost": c})
+
+            if (sr.traffic_multiplier < 1.0 or sr.conversion_multiplier < 1.0) and bool(
+                getattr(mit, "use_promo_boost", False)
+            ):
+                sr.traffic_multiplier *= max(0.0, float(getattr(mit, "promo_traffic_boost", 1.05) or 1.05))
+                sr.conversion_multiplier *= max(0.0, float(getattr(mit, "promo_conversion_boost", 1.08) or 1.08))
+                c = max(0.0, float(getattr(mit, "promo_daily_cost", 80.0) or 0.0))
+                sr.mitigation_cost += c
+                mitigation_actions.append({"action": "promo_boost", "cost": c})
+
+            if sr.capacity_multiplier < 1.0 and bool(getattr(mit, "use_overtime_capacity", False)):
+                sr.capacity_multiplier *= max(0.0, float(getattr(mit, "overtime_capacity_boost", 1.20) or 1.20))
+                c = max(0.0, float(getattr(mit, "overtime_daily_cost", 100.0) or 0.0))
+                sr.mitigation_cost += c
+                mitigation_actions.append({"action": "overtime_capacity", "cost": c})
+
+        # Clamp after mitigation
+        sr.traffic_multiplier = max(0.0, min(3.0, float(sr.traffic_multiplier)))
+        sr.conversion_multiplier = max(0.0, min(3.0, float(sr.conversion_multiplier)))
+        sr.capacity_multiplier = max(0.0, min(3.0, float(sr.capacity_multiplier)))
+        sr.variable_cost_multiplier = max(0.0, min(5.0, float(sr.variable_cost_multiplier)))
+        sr.mitigation_actions_json = json.dumps(mitigation_actions, ensure_ascii=False)
+
+        # Inventory pipeline (arrivals -> auto replenishment order)
+        arrivals = _process_pending_inbounds(store, state.day)
+        sr.inbound_arrivals_json = json.dumps(arrivals, ensure_ascii=False)
+        repl_cost, repl_orders = _auto_replenish(state, store, state.day)
+        sr.replenishment_cost = float(repl_cost)
+        sr.replenishment_orders_json = json.dumps(repl_orders, ensure_ascii=False)
+
         # Traffic
-        sr.fuel_traffic = _int_jitter(station.fuel_vehicles_per_day, station.traffic_volatility)
-        sr.visitor_traffic = _int_jitter(station.visitor_vehicles_per_day, station.traffic_volatility)
+        base_fuel = _int_jitter(station.fuel_vehicles_per_day, station.traffic_volatility, rng)
+        base_vis = _int_jitter(station.visitor_vehicles_per_day, station.traffic_volatility, rng)
+        sr.fuel_traffic = int(round(float(base_fuel) * float(sr.traffic_multiplier)))
+        sr.visitor_traffic = int(round(float(base_vis) * float(sr.traffic_multiplier)))
 
         _ensure_mtd_order_keys(store)
 
         # Orders
-        orders_by_service = _orders_for_store(store, sr.fuel_traffic, sr.visitor_traffic, cfg=cfg)
+        if sr.store_closed:
+            orders_by_service = {}
+        else:
+            orders_by_service = _orders_for_store(
+                store,
+                sr.fuel_traffic,
+                sr.visitor_traffic,
+                cfg=cfg,
+                conversion_multiplier=float(sr.conversion_multiplier),
+                capacity_multiplier=float(sr.capacity_multiplier),
+            )
         sr.orders_by_service = orders_by_service
 
         wash_orders_actual = 0
@@ -619,7 +1126,7 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
             if line.project_mix:
                 red = sc_reduction if getattr(line, "category", "other") == "maintenance" else 0.0
                 proj_counts, proj_revenue, proj_parts_cogs, proj_var_cost, proj_parts_by = _generate_projects_for_service_line(
-                    store, line, int(orders), parts_cost_reduction_rate=red
+                    store, line, int(orders), parts_cost_reduction_rate=red, rng=rng
                 )
                 for pid, n in proj_counts.items():
                     orders_by_project[pid] = orders_by_project.get(pid, 0) + int(n)
@@ -665,18 +1172,31 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
         variable_cost += consumable_cogs
 
         # Value-added streams
-        (
-            sr.rev_online,
-            sr.gp_online,
-            sr.rev_insurance,
-            sr.gp_insurance,
-            sr.rev_used_car,
-            sr.gp_used_car,
-            sr.count_used_car,
-        ) = simulate_value_added_services(store, state.day, cfg)
+        if sr.store_closed:
+            sr.rev_online = 0.0
+            sr.gp_online = 0.0
+            sr.rev_insurance = 0.0
+            sr.gp_insurance = 0.0
+            sr.rev_used_car = 0.0
+            sr.gp_used_car = 0.0
+            sr.count_used_car = 0
+        else:
+            (
+                sr.rev_online,
+                sr.gp_online,
+                sr.rev_insurance,
+                sr.gp_insurance,
+                sr.rev_used_car,
+                sr.gp_used_car,
+                sr.count_used_car,
+            ) = simulate_value_added_services(store, state.day, cfg, rng=rng)
 
         value_added_revenue = sr.rev_online + sr.rev_insurance + sr.rev_used_car
         value_added_gross_profit = sr.gp_online + sr.gp_insurance + sr.gp_used_car
+
+        # Apply variable cost multiplier (events) on variable costs and COGS.
+        variable_cost *= float(sr.variable_cost_multiplier)
+        parts_cogs *= float(sr.variable_cost_multiplier)
 
         sr.revenue = revenue_core + value_added_revenue
         sr.variable_cost = variable_cost
@@ -689,7 +1209,7 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
 
         # Depreciation/fixed overhead
         sr.depreciation_cost = _depreciation_cost(store, state.day)
-        sr.fixed_overhead = float(store.fixed_overhead_per_day)
+        sr.fixed_overhead = float(store.fixed_overhead_per_day) + float(sr.mitigation_cost)
 
         gross_profit_core = revenue_core - variable_cost - parts_cogs
         gross_profit_total = gross_profit_core + value_added_gross_profit
@@ -809,6 +1329,8 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
         sr.cash_in = sr.revenue
         # Daily labor is paid out as cash; depreciation is non-cash.
         sr.cash_out += sr.labor_cost + sr.fixed_overhead + sr.cost_rent + sr.cost_water + sr.cost_elec
+        # Auto replenishment is cash out (inventory asset), not P/L expense.
+        sr.cash_out += float(sr.replenishment_cost)
 
         state.cash += sr.cash_in
         state.cash -= sr.cash_out
@@ -837,6 +1359,9 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
         day_result.total_net_cashflow += sr.net_cashflow
 
     state.ledger.append(day_result)
+
+    # Persist RNG state so split runs stay reproducible.
+    _persist_rng_state(state, rng)
     state.day += 1
 
     # Month-end reset

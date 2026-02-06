@@ -13,9 +13,99 @@ Base URL（本机默认）：`http://127.0.0.1:8000`
 ### GET `/api/state`
 
 - 返回：`SimulationState`
-- 说明：包含 `stations[]`、`stores[]`、`ledger[]`（最近 200 条）
+- 说明：包含 `stations[]`、`stores[]`、`ledger[]`（最近 200 条），以及 `events`（事件系统）
+
+`events` 结构：
+
+```json
+{
+  "events": {
+    "rng_seed": 20260101,
+    "templates": ["..."],
+    "active": ["..."],
+    "history": ["..."]
+  }
+}
+```
 
 ---
+
+## 1.1) 事件系统
+
+### GET `/api/events`
+
+- 返回：仅事件字段（等价于 `state.events`）
+
+### POST `/api/events/seed`
+
+- Body：`{ "seed": 20260101 }`
+- 返回：全量 `SimulationState`
+- 说明：设置 `rng_seed` 并清空 `rng_state`，用于复现随机
+
+### POST `/api/event-templates`
+
+- Body：事件模板（可部分字段；留空 `template_id` 会自动生成）
+- 返回：全量 `SimulationState`
+
+### DELETE `/api/event-templates/{template_id}`
+
+- 返回：全量 `SimulationState`
+
+### POST `/api/events/inject`
+
+- Body：
+```json
+{
+  "template_id": "power_outage",
+  "scope": "store",
+  "target_id": "M1",
+  "start_day": 12,
+  "duration_days": 2,
+  "intensity": 0.9
+}
+```
+
+- 返回：全量 `SimulationState`
+- 说明：用于联调/演示，强制把某模板事件注入到指定范围目标
+
+---
+
+## 1.2) 策略实验（P1）
+
+### GET `/api/site-recommendations`
+
+- Query：
+  - `top_k`（默认 10，最大 100）
+  - `radius`（默认 15）
+  - `distance_mode`（`road_proxy`/`road_graph`/`euclidean`，默认 `road_proxy`）
+  - `graph_k_neighbors`（仅 `road_graph` 生效，默认 3）
+- 返回：推荐站点列表（未覆盖需求、最近开店距离、评分、距离置信度、评分分解）
+
+### POST `/api/scenarios/compare`
+
+- Body：
+```json
+{
+  "days": 30,
+  "seed": 20260101,
+  "scenarios": [
+    {
+      "name": "A-高竞争",
+      "store_patches": [
+        {
+          "store_id": "M1",
+          "local_competition_intensity": 0.4,
+          "attractiveness_index": 1.0,
+          "traffic_conversion_rate": 1.0
+        }
+      ]
+    }
+  ]
+}
+```
+
+- 返回：`baseline` 与 `scenarios[]` 指标及 `delta_vs_baseline`
+- 说明：只在内存并行仿真，不改写真实 `state.json` 与 `ledger.csv`
 
 ## 2) 模拟/回退/重置
 
@@ -101,6 +191,7 @@ Base URL（本机默认）：`http://127.0.0.1:8000`
 ### PUT `/api/stores/{store_id}`
 
 - Body：Store 的 patch（部分字段即可）
+- 新增（P2）：支持 `mitigation`（事件对冲配置）与 `auto_replenishment_enabled`
 
 ### POST `/api/stores/{store_id}/close`
 
@@ -109,6 +200,24 @@ Base URL（本机默认）：`http://127.0.0.1:8000`
 ### POST `/api/stores/{store_id}/inventory/purchase`
 
 - Body：`{ "sku":"...", "name":"...", "unit_cost":12.3, "qty":10 }`
+
+### POST `/api/stores/{store_id}/replenishment/rules`
+
+- Body：
+```json
+{
+  "sku": "CHEM",
+  "name": "洗车液",
+  "enabled": true,
+  "reorder_point": 50,
+  "safety_stock": 80,
+  "target_stock": 150,
+  "lead_time_days": 2,
+  "unit_cost": 20
+}
+```
+
+### DELETE `/api/stores/{store_id}/replenishment/rules/{sku}`
 
 ### POST `/api/stores/{store_id}/assets`
 
