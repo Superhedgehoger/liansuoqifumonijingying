@@ -234,6 +234,10 @@ export interface SimulationState {
   insights?: {
     alerts: Array<{ level: string; code: string; message: string }>;
   };
+  bulk_templates?: {
+    store_ops: Array<{ name: string; status: 'planning' | 'constructing' | 'open' | 'closed'; inv: number; asset: number }>;
+    station_ops: Array<{ name: string; fuel_factor: number; visitor_factor: number }>;
+  };
   stations: Station[];
   stores: Store[];
   ledger: LedgerEntry[];

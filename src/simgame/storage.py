@@ -24,6 +24,8 @@ from simgame.models import (
     RolePlan,
     ServiceLine,
     ServiceProject,
+    StationBulkTemplate,
+    StoreBulkTemplate,
     Station,
     Store,
     SupplyChainConfig,
@@ -425,6 +427,35 @@ def load_state(path: Path | None = None) -> GameState:
     state.budget_monthly_revenue_target = max(0.0, float(d.get("budget_monthly_revenue_target", 0.0) or 0.0))
     state.budget_monthly_profit_target = max(0.0, float(d.get("budget_monthly_profit_target", 0.0) or 0.0))
     state.budget_monthly_cashflow_target = max(0.0, float(d.get("budget_monthly_cashflow_target", 0.0) or 0.0))
+    state.store_bulk_templates = []
+    for t in (d.get("store_bulk_templates") or []):
+        if not isinstance(t, dict):
+            continue
+        name = str(t.get("name", "") or "").strip()
+        if not name:
+            continue
+        state.store_bulk_templates.append(
+            StoreBulkTemplate(
+                name=name,
+                status=str(t.get("status", "open") or "open"),
+                inventory_salvage_rate=max(0.0, min(1.0, float(t.get("inventory_salvage_rate", 0.3) or 0.0))),
+                asset_salvage_rate=max(0.0, min(1.0, float(t.get("asset_salvage_rate", 0.1) or 0.0))),
+            )
+        )
+    state.station_bulk_templates = []
+    for t in (d.get("station_bulk_templates") or []):
+        if not isinstance(t, dict):
+            continue
+        name = str(t.get("name", "") or "").strip()
+        if not name:
+            continue
+        state.station_bulk_templates.append(
+            StationBulkTemplate(
+                name=name,
+                fuel_factor=max(0.0, float(t.get("fuel_factor", 1.0) or 0.0)),
+                visitor_factor=max(0.0, float(t.get("visitor_factor", 1.0) or 0.0)),
+            )
+        )
     _seed_default_event_templates(state)
 
     # Stations

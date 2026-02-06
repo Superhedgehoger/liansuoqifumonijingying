@@ -15,7 +15,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from simgame.engine import EngineConfig, close_store, inject_event_from_template, purchase_inventory, simulate_day
-from simgame.models import ActiveEvent, Asset, EventHistoryRecord, EventTemplate, GameState, RolePlan, ServiceLine, ServiceProject, Station, Store
+from simgame.models import (
+    ActiveEvent,
+    Asset,
+    EventHistoryRecord,
+    EventTemplate,
+    GameState,
+    RolePlan,
+    ServiceLine,
+    ServiceProject,
+    StationBulkTemplate,
+    Station,
+    Store,
+    StoreBulkTemplate,
+)
 from simgame.presets import apply_default_store_template
 from simgame.storage import (
     append_ledger_csv,
@@ -1248,6 +1261,25 @@ def create_app() -> FastAPI:
             "stores": [_store_to_dto(s) for s in state.stores.values()],
             "ledger": _read_ledger_entries(limit=200),
             "insights": {"alerts": alerts[:300]},
+            "bulk_templates": {
+                "store_ops": [
+                    {
+                        "name": str(t.name),
+                        "status": str(t.status),
+                        "inv": float(t.inventory_salvage_rate),
+                        "asset": float(t.asset_salvage_rate),
+                    }
+                    for t in (getattr(state, "store_bulk_templates", []) or [])
+                ],
+                "station_ops": [
+                    {
+                        "name": str(t.name),
+                        "fuel_factor": float(t.fuel_factor),
+                        "visitor_factor": float(t.visitor_factor),
+                    }
+                    for t in (getattr(state, "station_bulk_templates", []) or [])
+                ],
+            },
             "events": {
                 "rng_seed": int(getattr(state, "rng_seed", 0) or 0),
                 "templates": [_event_template_to_dto(t) for t in getattr(state, "event_templates", {}).values()],
@@ -1303,6 +1335,225 @@ def create_app() -> FastAPI:
                 if actual > 0:
                     state.cash -= actual
                     state.hq_credit_used = max(0.0, float(state.hq_credit_used) - actual)
+            save_state(state)
+        return api_state()
+
+    @app.post("/api/bulk-templates/store-ops")
+    def api_store_bulk_template_upsert(payload: dict = Body(default={})):
+        with _lock:
+            state = _ensure_state()
+            name = str(payload.get("name") or "").strip()
+            if not name:
+                return {"error": "name is required"}
+            status = str(payload.get("status") or "open").strip()
+            if status not in {"planning", "constructing", "open", "closed"}:
+                status = "open"
+            inv = max(0.0, min(1.0, float(payload.get("inv", 0.3) or 0.0)))
+            asset = max(0.0, min(1.0, float(payload.get("asset", 0.1) or 0.0)))
+
+            templates = [x for x in (getattr(state, "store_bulk_templates", []) or []) if str(x.name) != name]
+            templates.insert(
+                0,
+                StoreBulkTemplate(
+                    name=name,
+                    status=status,
+                    inventory_salvage_rate=inv,
+                    asset_salvage_rate=asset,
+                ),
+            )
+            state.store_bulk_templates = templates[:20]
+            save_state(state)
+        return api_state()
+
+    @app.delete("/api/bulk-templates/store-ops/{name}")
+    def api_store_bulk_template_delete(name: str):
+        with _lock:
+            state = _ensure_state()
+            state.store_bulk_templates = [x for x in (getattr(state, "store_bulk_templates", []) or []) if str(x.name) != str(name)]
+            save_state(state)
+        return api_state()
+
+    @app.patch("/api/bulk-templates/store-ops/{name}")
+    def api_store_bulk_template_rename(name: str, payload: dict = Body(default={})):
+        new_name = str(payload.get("new_name") or "").strip()
+        if not new_name:
+            return {"error": "new_name is required"}
+        with _lock:
+            state = _ensure_state()
+            templates = list(getattr(state, "store_bulk_templates", []) or [])
+            target = None
+            rest = []
+            for t in templates:
+                if str(t.name) == str(name):
+                    target = t
+                elif str(t.name) != new_name:
+                    rest.append(t)
+            if target is None:
+                return {"error": "template not found"}
+            rest.insert(
+                0,
+                StoreBulkTemplate(
+                    name=new_name,
+                    status=str(target.status),
+                    inventory_salvage_rate=float(target.inventory_salvage_rate),
+                    asset_salvage_rate=float(target.asset_salvage_rate),
+                ),
+            )
+            state.store_bulk_templates = rest[:20]
+            save_state(state)
+        return api_state()
+
+    @app.get("/api/bulk-templates/store-ops/export")
+    def api_store_bulk_template_export():
+        with _lock:
+            state = _ensure_state()
+            return {
+                "templates": [
+                    {
+                        "name": str(t.name),
+                        "status": str(t.status),
+                        "inv": float(t.inventory_salvage_rate),
+                        "asset": float(t.asset_salvage_rate),
+                    }
+                    for t in (getattr(state, "store_bulk_templates", []) or [])
+                ]
+            }
+
+    @app.post("/api/bulk-templates/store-ops/import")
+    def api_store_bulk_template_import(payload: dict = Body(default={})):
+        mode = str(payload.get("mode") or "merge").strip().lower()
+        if mode not in {"merge", "replace"}:
+            mode = "merge"
+        raw_templates = payload.get("templates") or []
+        with _lock:
+            state = _ensure_state()
+            current = list(getattr(state, "store_bulk_templates", []) or [])
+            by_name = {}
+            if mode == "merge":
+                for t in current:
+                    by_name[str(t.name)] = t
+
+            for item in raw_templates:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                status = str(item.get("status") or "open").strip()
+                if status not in {"planning", "constructing", "open", "closed"}:
+                    status = "open"
+                inv = max(0.0, min(1.0, float(item.get("inv", 0.3) or 0.0)))
+                asset = max(0.0, min(1.0, float(item.get("asset", 0.1) or 0.0)))
+                by_name[name] = StoreBulkTemplate(
+                    name=name,
+                    status=status,
+                    inventory_salvage_rate=inv,
+                    asset_salvage_rate=asset,
+                )
+
+            state.store_bulk_templates = list(by_name.values())[:20]
+            save_state(state)
+        return api_state()
+
+    @app.post("/api/bulk-templates/station-ops")
+    def api_station_bulk_template_upsert(payload: dict = Body(default={})):
+        with _lock:
+            state = _ensure_state()
+            name = str(payload.get("name") or "").strip()
+            if not name:
+                return {"error": "name is required"}
+            fuel_factor = max(0.0, float(payload.get("fuel_factor", 1.0) or 0.0))
+            visitor_factor = max(0.0, float(payload.get("visitor_factor", 1.0) or 0.0))
+
+            templates = [x for x in (getattr(state, "station_bulk_templates", []) or []) if str(x.name) != name]
+            templates.insert(0, StationBulkTemplate(name=name, fuel_factor=fuel_factor, visitor_factor=visitor_factor))
+            state.station_bulk_templates = templates[:20]
+            save_state(state)
+        return api_state()
+
+    @app.delete("/api/bulk-templates/station-ops/{name}")
+    def api_station_bulk_template_delete(name: str):
+        with _lock:
+            state = _ensure_state()
+            state.station_bulk_templates = [
+                x for x in (getattr(state, "station_bulk_templates", []) or []) if str(x.name) != str(name)
+            ]
+            save_state(state)
+        return api_state()
+
+    @app.patch("/api/bulk-templates/station-ops/{name}")
+    def api_station_bulk_template_rename(name: str, payload: dict = Body(default={})):
+        new_name = str(payload.get("new_name") or "").strip()
+        if not new_name:
+            return {"error": "new_name is required"}
+        with _lock:
+            state = _ensure_state()
+            templates = list(getattr(state, "station_bulk_templates", []) or [])
+            target = None
+            rest = []
+            for t in templates:
+                if str(t.name) == str(name):
+                    target = t
+                elif str(t.name) != new_name:
+                    rest.append(t)
+            if target is None:
+                return {"error": "template not found"}
+            rest.insert(
+                0,
+                StationBulkTemplate(
+                    name=new_name,
+                    fuel_factor=float(target.fuel_factor),
+                    visitor_factor=float(target.visitor_factor),
+                ),
+            )
+            state.station_bulk_templates = rest[:20]
+            save_state(state)
+        return api_state()
+
+    @app.get("/api/bulk-templates/station-ops/export")
+    def api_station_bulk_template_export():
+        with _lock:
+            state = _ensure_state()
+            return {
+                "templates": [
+                    {
+                        "name": str(t.name),
+                        "fuel_factor": float(t.fuel_factor),
+                        "visitor_factor": float(t.visitor_factor),
+                    }
+                    for t in (getattr(state, "station_bulk_templates", []) or [])
+                ]
+            }
+
+    @app.post("/api/bulk-templates/station-ops/import")
+    def api_station_bulk_template_import(payload: dict = Body(default={})):
+        mode = str(payload.get("mode") or "merge").strip().lower()
+        if mode not in {"merge", "replace"}:
+            mode = "merge"
+        raw_templates = payload.get("templates") or []
+        with _lock:
+            state = _ensure_state()
+            current = list(getattr(state, "station_bulk_templates", []) or [])
+            by_name = {}
+            if mode == "merge":
+                for t in current:
+                    by_name[str(t.name)] = t
+
+            for item in raw_templates:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                fuel_factor = max(0.0, float(item.get("fuel_factor", 1.0) or 0.0))
+                visitor_factor = max(0.0, float(item.get("visitor_factor", 1.0) or 0.0))
+                by_name[name] = StationBulkTemplate(
+                    name=name,
+                    fuel_factor=fuel_factor,
+                    visitor_factor=visitor_factor,
+                )
+
+            state.station_bulk_templates = list(by_name.values())[:20]
             save_state(state)
         return api_state()
 

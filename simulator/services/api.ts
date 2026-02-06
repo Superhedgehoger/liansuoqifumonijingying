@@ -169,6 +169,89 @@ export function apiUpdateFinance(payload: {
   });
 }
 
+export function apiUpsertStoreBulkTemplate(payload: {
+  name: string;
+  status: 'planning' | 'constructing' | 'open' | 'closed';
+  inv: number;
+  asset: number;
+}): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/bulk-templates/store-ops', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+export function apiDeleteStoreBulkTemplate(name: string): Promise<SimulationState> {
+  return requestJson<SimulationState>(`/api/bulk-templates/store-ops/${encodeURIComponent(name)}`, {
+    method: 'DELETE'
+  });
+}
+
+export function apiRenameStoreBulkTemplate(oldName: string, newName: string): Promise<SimulationState> {
+  return requestJson<SimulationState>(`/api/bulk-templates/store-ops/${encodeURIComponent(oldName)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_name: newName })
+  });
+}
+
+export function apiExportStoreBulkTemplates(): Promise<{ templates: Array<{ name: string; status: 'planning' | 'constructing' | 'open' | 'closed'; inv: number; asset: number }> }> {
+  return requestJson<{ templates: Array<{ name: string; status: 'planning' | 'constructing' | 'open' | 'closed'; inv: number; asset: number }> }>('/api/bulk-templates/store-ops/export');
+}
+
+export function apiImportStoreBulkTemplates(payload: {
+  templates: Array<{ name: string; status: 'planning' | 'constructing' | 'open' | 'closed'; inv: number; asset: number }>;
+  mode?: 'merge' | 'replace';
+}): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/bulk-templates/store-ops/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+export function apiUpsertStationBulkTemplate(payload: {
+  name: string;
+  fuel_factor: number;
+  visitor_factor: number;
+}): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/bulk-templates/station-ops', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+export function apiDeleteStationBulkTemplate(name: string): Promise<SimulationState> {
+  return requestJson<SimulationState>(`/api/bulk-templates/station-ops/${encodeURIComponent(name)}`, {
+    method: 'DELETE'
+  });
+}
+
+export function apiRenameStationBulkTemplate(oldName: string, newName: string): Promise<SimulationState> {
+  return requestJson<SimulationState>(`/api/bulk-templates/station-ops/${encodeURIComponent(oldName)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_name: newName })
+  });
+}
+
+export function apiExportStationBulkTemplates(): Promise<{ templates: Array<{ name: string; fuel_factor: number; visitor_factor: number }> }> {
+  return requestJson<{ templates: Array<{ name: string; fuel_factor: number; visitor_factor: number }> }>('/api/bulk-templates/station-ops/export');
+}
+
+export function apiImportStationBulkTemplates(payload: {
+  templates: Array<{ name: string; fuel_factor: number; visitor_factor: number }>;
+  mode?: 'merge' | 'replace';
+}): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/bulk-templates/station-ops/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
 export function apiUpsertServiceLine(store_id: string, payload: any): Promise<SimulationState> {
   return requestJson<SimulationState>(`/api/stores/${encodeURIComponent(store_id)}/services`, {
     method: 'POST',

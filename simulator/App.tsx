@@ -43,7 +43,17 @@ import {
   apiUpsertEventTemplate,
   apiUpsertProject,
   apiUpsertRole,
+  apiUpsertStoreBulkTemplate,
   apiUpdateFinance,
+  apiDeleteStoreBulkTemplate,
+  apiRenameStoreBulkTemplate,
+  apiExportStoreBulkTemplates,
+  apiImportStoreBulkTemplates,
+  apiUpsertStationBulkTemplate,
+  apiDeleteStationBulkTemplate,
+  apiRenameStationBulkTemplate,
+  apiExportStationBulkTemplates,
+  apiImportStationBulkTemplates,
   apiUpsertServiceLine
 } from './services/api';
 import {
@@ -194,11 +204,159 @@ const ImportDataModal = ({
   );
 };
 
+const TemplateCenterModal = ({ onClose }: { onClose: () => void }) => {
+  const { state, dispatch } = React.useContext(StateContext);
+  const [tab, setTab] = useState<'store' | 'station'>('store');
+  const [storeName, setStoreName] = useState('');
+  const [stationName, setStationName] = useState('');
+
+  const storeTemplates = state.bulk_templates?.store_ops || [];
+  const stationTemplates = state.bulk_templates?.station_ops || [];
+
+  const exportStore = async () => {
+    const data = await apiExportStoreBulkTemplates();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `store-bulk-templates-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportStation = async () => {
+    const data = await apiExportStationBulkTemplates();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `station-bulk-templates-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden">
+        <div className="p-6 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <div className="text-lg font-bold text-slate-900">模板中心</div>
+            <div className="text-xs text-slate-500 mt-1">统一管理门店/站点批量模板（重命名、删除、导入导出）。</div>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-900"><span className="material-symbols-outlined">close</span></button>
+        </div>
+
+        <div className="px-6 pt-4">
+          <div className="bg-slate-100 p-1 rounded-lg inline-flex">
+            <button onClick={() => setTab('store')} className={`px-3 py-1.5 rounded-md text-sm font-medium ${tab === 'store' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}>门店模板</button>
+            <button onClick={() => setTab('station')} className={`px-3 py-1.5 rounded-md text-sm font-medium ${tab === 'station' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}>站点模板</button>
+          </div>
+        </div>
+
+        <div className="p-6 space-y-3 max-h-[70vh] overflow-auto">
+          {tab === 'store' && (
+            <>
+              <div className="flex gap-2">
+                <input value={storeName} onChange={(e) => setStoreName(e.target.value)} placeholder="输入模板名后可重命名/删除" className="h-10 flex-1 rounded-lg border border-slate-300 px-3 text-sm" />
+                <button onClick={exportStore} className="h-10 px-3 rounded-lg border border-slate-300 text-sm font-semibold">导出JSON</button>
+                <label className="h-10 px-3 rounded-lg border border-slate-300 text-sm font-semibold inline-flex items-center cursor-pointer">导入合并
+                  <input type="file" className="hidden" accept="application/json,.json" onChange={async (e) => {
+                    const f = e.target.files?.[0]; if (!f) return;
+                    const text = await f.text(); const parsed = JSON.parse(text);
+                    const next = await apiImportStoreBulkTemplates({ templates: Array.isArray(parsed?.templates) ? parsed.templates : [], mode: 'merge' });
+                    await dispatch({ type: 'SET_STATE', payload: next } as any); e.currentTarget.value = '';
+                  }} />
+                </label>
+                <label className="h-10 px-3 rounded-lg border border-amber-300 text-amber-700 text-sm font-semibold inline-flex items-center cursor-pointer">导入覆盖
+                  <input type="file" className="hidden" accept="application/json,.json" onChange={async (e) => {
+                    const f = e.target.files?.[0]; if (!f) return;
+                    if (!window.confirm('覆盖导入会替换现有模板，确认继续？')) { e.currentTarget.value=''; return; }
+                    const text = await f.text(); const parsed = JSON.parse(text);
+                    const next = await apiImportStoreBulkTemplates({ templates: Array.isArray(parsed?.templates) ? parsed.templates : [], mode: 'replace' });
+                    await dispatch({ type: 'SET_STATE', payload: next } as any); e.currentTarget.value='';
+                  }} />
+                </label>
+              </div>
+              <div className="space-y-2">
+                {storeTemplates.map((t) => (
+                  <div key={t.name} className="border border-slate-200 rounded-lg p-3 flex items-center justify-between gap-2">
+                    <div className="text-sm"><div className="font-semibold text-slate-900">{t.name}</div><div className="text-xs text-slate-500">{t.status} | inv={t.inv} | asset={t.asset}</div></div>
+                    <div className="flex gap-1">
+                      <button onClick={() => setStoreName(t.name)} className="px-2 py-1 text-xs rounded border border-slate-300">选中</button>
+                      <button onClick={async () => {
+                        const n = window.prompt('新模板名', t.name)?.trim();
+                        if (!n || n === t.name) return;
+                        const next = await apiRenameStoreBulkTemplate(t.name, n);
+                        await dispatch({ type: 'SET_STATE', payload: next } as any);
+                      }} className="px-2 py-1 text-xs rounded border border-slate-300">重命名</button>
+                      <button onClick={async () => {
+                        const next = await apiDeleteStoreBulkTemplate(t.name);
+                        await dispatch({ type: 'SET_STATE', payload: next } as any);
+                      }} className="px-2 py-1 text-xs rounded border border-rose-300 text-rose-600">删除</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {tab === 'station' && (
+            <>
+              <div className="flex gap-2">
+                <input value={stationName} onChange={(e) => setStationName(e.target.value)} placeholder="输入模板名后可重命名/删除" className="h-10 flex-1 rounded-lg border border-slate-300 px-3 text-sm" />
+                <button onClick={exportStation} className="h-10 px-3 rounded-lg border border-slate-300 text-sm font-semibold">导出JSON</button>
+                <label className="h-10 px-3 rounded-lg border border-slate-300 text-sm font-semibold inline-flex items-center cursor-pointer">导入合并
+                  <input type="file" className="hidden" accept="application/json,.json" onChange={async (e) => {
+                    const f = e.target.files?.[0]; if (!f) return;
+                    const text = await f.text(); const parsed = JSON.parse(text);
+                    const next = await apiImportStationBulkTemplates({ templates: Array.isArray(parsed?.templates) ? parsed.templates : [], mode: 'merge' });
+                    await dispatch({ type: 'SET_STATE', payload: next } as any); e.currentTarget.value='';
+                  }} />
+                </label>
+                <label className="h-10 px-3 rounded-lg border border-amber-300 text-amber-700 text-sm font-semibold inline-flex items-center cursor-pointer">导入覆盖
+                  <input type="file" className="hidden" accept="application/json,.json" onChange={async (e) => {
+                    const f = e.target.files?.[0]; if (!f) return;
+                    if (!window.confirm('覆盖导入会替换现有模板，确认继续？')) { e.currentTarget.value=''; return; }
+                    const text = await f.text(); const parsed = JSON.parse(text);
+                    const next = await apiImportStationBulkTemplates({ templates: Array.isArray(parsed?.templates) ? parsed.templates : [], mode: 'replace' });
+                    await dispatch({ type: 'SET_STATE', payload: next } as any); e.currentTarget.value='';
+                  }} />
+                </label>
+              </div>
+              <div className="space-y-2">
+                {stationTemplates.map((t) => (
+                  <div key={t.name} className="border border-slate-200 rounded-lg p-3 flex items-center justify-between gap-2">
+                    <div className="text-sm"><div className="font-semibold text-slate-900">{t.name}</div><div className="text-xs text-slate-500">fuel={t.fuel_factor} | visitor={t.visitor_factor}</div></div>
+                    <div className="flex gap-1">
+                      <button onClick={() => setStationName(t.name)} className="px-2 py-1 text-xs rounded border border-slate-300">选中</button>
+                      <button onClick={async () => {
+                        const n = window.prompt('新模板名', t.name)?.trim();
+                        if (!n || n === t.name) return;
+                        const next = await apiRenameStationBulkTemplate(t.name, n);
+                        await dispatch({ type: 'SET_STATE', payload: next } as any);
+                      }} className="px-2 py-1 text-xs rounded border border-slate-300">重命名</button>
+                      <button onClick={async () => {
+                        const next = await apiDeleteStationBulkTemplate(t.name);
+                        await dispatch({ type: 'SET_STATE', payload: next } as any);
+                      }} className="px-2 py-1 text-xs rounded border border-rose-300 text-rose-600">删除</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const Header = () => {
   const { state, dispatch } = React.useContext(StateContext);
   const [isSimulating, setIsSimulating] = useState(false);
   const [daysInput, setDaysInput] = useState<number>(7);
   const [importOpen, setImportOpen] = useState(false);
+  const [templateCenterOpen, setTemplateCenterOpen] = useState(false);
   const location = useLocation();
 
   // Hide main header on GIS page
@@ -263,6 +421,13 @@ const Header = () => {
 
         <div className="hidden md:flex items-center gap-2">
           <button
+            onClick={() => setTemplateCenterOpen(true)}
+            className="h-9 px-3 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold hover:bg-white hover:shadow-sm"
+            title="打开模板中心"
+          >
+            模板中心
+          </button>
+          <button
             onClick={() => setImportOpen(true)}
             className="h-9 px-3 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold hover:bg-white hover:shadow-sm"
             title="打开测试数据导入弹窗"
@@ -325,6 +490,7 @@ const Header = () => {
         }}
       />
     )}
+    {templateCenterOpen && <TemplateCenterModal onClose={() => setTemplateCenterOpen(false)} />}
     </>
   );
 };
@@ -1015,6 +1181,130 @@ const Dashboard = () => {
 const StationsPage = () => {
   const { state, dispatch } = React.useContext(StateContext);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
+  const [search, setSearch] = useState('');
+  const [selectedStationIds, setSelectedStationIds] = useState<string[]>([]);
+  const [bulkFuelFactor, setBulkFuelFactor] = useState(1);
+  const [bulkVisitorFactor, setBulkVisitorFactor] = useState(1);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [stationTemplateName, setStationTemplateName] = useState('站点默认');
+  const stationTemplates = useMemo(() => state.bulk_templates?.station_ops || [], [state.bulk_templates]);
+
+  const filteredStations = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return state.stations;
+    return state.stations.filter((s) => {
+      const hay = `${s.station_id} ${s.name} ${s.station_type || ''} ${s.city || ''} ${s.district || ''} ${s.provider || ''}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [state.stations, search]);
+
+  const toggleSelectStation = (id: string) => {
+    setSelectedStationIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const filteredIds = filteredStations.map((s) => s.station_id);
+  const allFilteredSelected = filteredIds.length > 0 && filteredIds.every((id) => selectedStationIds.includes(id));
+  const toggleSelectAllFiltered = () => {
+    if (allFilteredSelected) {
+      setSelectedStationIds((prev) => prev.filter((id) => !filteredIds.includes(id)));
+      return;
+    }
+    setSelectedStationIds((prev) => Array.from(new Set([...prev, ...filteredIds])));
+  };
+
+  const runBulkAdjustTraffic = async () => {
+    if (selectedStationIds.length === 0) return;
+    setBulkBusy(true);
+    try {
+      for (const id of selectedStationIds) {
+        const st = state.stations.find((x) => x.station_id === id);
+        if (!st) continue;
+        await dispatch({
+          type: 'UPDATE_STATION',
+          payload: {
+            station_id: id,
+            patch: {
+              fuel_vehicles_per_day: Math.max(0, Math.round(Number(st.fuel_vehicles_per_day || 0) * Number(bulkFuelFactor || 1))),
+              visitor_vehicles_per_day: Math.max(0, Math.round(Number(st.visitor_vehicles_per_day || 0) * Number(bulkVisitorFactor || 1))),
+            },
+          },
+        });
+      }
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const runBulkDeleteStations = async () => {
+    if (selectedStationIds.length === 0) return;
+    if (!window.confirm(`确认批量删除 ${selectedStationIds.length} 个站点？可能导致关联门店孤立。`)) return;
+    setBulkBusy(true);
+    try {
+      for (const id of selectedStationIds) {
+        await dispatch({ type: 'DELETE_STATION', payload: id });
+      }
+      setSelectedStationIds([]);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const saveStationTemplate = async () => {
+    const name = stationTemplateName.trim();
+    if (!name) return;
+    const next = await apiUpsertStationBulkTemplate({
+      name,
+      fuel_factor: Math.max(0, Number(bulkFuelFactor) || 0),
+      visitor_factor: Math.max(0, Number(bulkVisitorFactor) || 0),
+    });
+    await dispatch({ type: 'SET_STATE', payload: next } as any);
+  };
+
+  const applyStationTemplate = (name: string) => {
+    const t = stationTemplates.find((x) => x.name === name);
+    if (!t) return;
+    setStationTemplateName(t.name);
+    setBulkFuelFactor(Number(t.fuel_factor || 1));
+    setBulkVisitorFactor(Number(t.visitor_factor || 1));
+  };
+
+  const deleteStationTemplate = async (name: string) => {
+    const next = await apiDeleteStationBulkTemplate(name);
+    await dispatch({ type: 'SET_STATE', payload: next } as any);
+  };
+
+  const renameStationTemplate = async () => {
+    const oldName = stationTemplateName;
+    if (!stationTemplates.some((x) => x.name === oldName)) {
+      alert('请先输入已存在模板名');
+      return;
+    }
+    const newName = window.prompt('请输入新模板名', oldName)?.trim();
+    if (!newName || newName === oldName) return;
+    const next = await apiRenameStationBulkTemplate(oldName, newName);
+    await dispatch({ type: 'SET_STATE', payload: next } as any);
+    setStationTemplateName(newName);
+  };
+
+  const exportStationTemplates = async () => {
+    const data = await apiExportStationBulkTemplates();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `station-bulk-templates-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importStationTemplates = async (file: File, mode: 'merge' | 'replace') => {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const templates = Array.isArray(parsed?.templates) ? parsed.templates : [];
+    const next = await apiImportStationBulkTemplates({ templates, mode });
+    await dispatch({ type: 'SET_STATE', payload: next } as any);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1041,19 +1331,83 @@ const StationsPage = () => {
           <h1 className="text-2xl font-bold text-slate-900">站点网络</h1>
           <p className="text-slate-500">管理您的物理站点位置及车流参数。</p>
         </div>
-        <button 
-          onClick={() => setIsModalOpen(true)}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm"
-        >
-          <span className="material-symbols-outlined">add_location</span>
-          新增站点
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="bg-slate-100 p-1 rounded-lg flex items-center">
+            <button onClick={() => setViewMode('cards')} className={`px-3 py-1.5 rounded-md text-xs font-medium ${viewMode === 'cards' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>卡片</button>
+            <button onClick={() => setViewMode('list')} className={`px-3 py-1.5 rounded-md text-xs font-medium ${viewMode === 'list' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>列表</button>
+          </div>
+          <button 
+            onClick={() => setIsModalOpen(true)}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm"
+          >
+            <span className="material-symbols-outlined">add_location</span>
+            新增站点
+          </button>
+        </div>
       </div>
 
+      <div className="mb-5">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="按ID/名称/地市/片区/服务商搜索"
+          className="w-full md:w-96 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+        />
+        <div className="text-xs text-slate-500 mt-1">共 {filteredStations.length} 个站点</div>
+      </div>
+
+      <div className="mb-5 bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-sm text-slate-700">
+          <input type="checkbox" checked={allFilteredSelected} onChange={toggleSelectAllFiltered} />
+          全选当前筛选
+        </label>
+        <div className="text-sm text-slate-500">已选 {selectedStationIds.length} 个</div>
+        <div className="h-5 w-px bg-slate-200" />
+        <label className="text-xs text-slate-500">加油车流倍率</label>
+        <input type="number" step="0.05" value={bulkFuelFactor} onChange={(e) => setBulkFuelFactor(Number(e.target.value) || 1)} className="h-9 w-24 rounded-lg border border-slate-300 px-2 text-sm font-mono" />
+        <label className="text-xs text-slate-500">访客倍率</label>
+        <input type="number" step="0.05" value={bulkVisitorFactor} onChange={(e) => setBulkVisitorFactor(Number(e.target.value) || 1)} className="h-9 w-24 rounded-lg border border-slate-300 px-2 text-sm font-mono" />
+        <button onClick={runBulkAdjustTraffic} disabled={bulkBusy || selectedStationIds.length === 0} className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold disabled:opacity-50">批量调流量</button>
+        <button onClick={runBulkDeleteStations} disabled={bulkBusy || selectedStationIds.length === 0} className="h-9 px-3 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold disabled:opacity-50">批量删除</button>
+        <div className="h-5 w-px bg-slate-200" />
+        <input value={stationTemplateName} onChange={(e) => setStationTemplateName(e.target.value)} placeholder="模板名" className="h-9 w-28 rounded-lg border border-slate-300 px-2 text-xs" />
+        <button onClick={saveStationTemplate} className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold">保存模板</button>
+        <button onClick={renameStationTemplate} className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold">重命名</button>
+        <button onClick={() => deleteStationTemplate(stationTemplateName)} disabled={!stationTemplates.some((t) => t.name === stationTemplateName)} className="h-9 px-3 rounded-lg border border-rose-300 text-rose-600 text-sm font-semibold disabled:opacity-50">删除模板</button>
+        <select onChange={(e) => applyStationTemplate(e.target.value)} defaultValue="" className="h-9 rounded-lg border border-slate-300 px-2 text-sm">
+          <option value="">套用模板...</option>
+          {stationTemplates.map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
+        </select>
+        <button onClick={exportStationTemplates} className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold">导出JSON</button>
+        <label className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold inline-flex items-center cursor-pointer">
+          导入(合并)
+          <input type="file" accept="application/json,.json" className="hidden" onChange={async (e) => {
+            const f = e.target.files?.[0];
+            if (!f) return;
+            try { await importStationTemplates(f, 'merge'); } catch (err: any) { alert(String(err?.message || err || '导入失败')); }
+            e.currentTarget.value = '';
+          }} />
+        </label>
+        <label className="h-9 px-3 rounded-lg border border-amber-300 text-amber-700 text-sm font-semibold inline-flex items-center cursor-pointer">
+          导入(覆盖)
+          <input type="file" accept="application/json,.json" className="hidden" onChange={async (e) => {
+            const f = e.target.files?.[0];
+            if (!f) return;
+            if (!window.confirm('覆盖导入会替换现有站点模板，确认继续？')) { e.currentTarget.value = ''; return; }
+            try { await importStationTemplates(f, 'replace'); } catch (err: any) { alert(String(err?.message || err || '导入失败')); }
+            e.currentTarget.value = '';
+          }} />
+        </label>
+      </div>
+
+      {viewMode === 'cards' && (
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {state.stations.map((station) => (
+        {filteredStations.map((station) => (
           <div key={station.station_id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden group">
             <div className="h-32 bg-slate-100 relative">
+              <label className="absolute top-3 left-3 z-10 bg-white/90 rounded px-1.5 py-1">
+                <input type="checkbox" checked={selectedStationIds.includes(station.station_id)} onChange={() => toggleSelectStation(station.station_id)} />
+              </label>
               <img 
                 src={`https://picsum.photos/seed/${station.station_id}/400/200`} 
                 alt="Station map" 
@@ -1098,6 +1452,45 @@ const StationsPage = () => {
           </div>
         ))}
       </div>
+      )}
+
+      {viewMode === 'list' && (
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
+                <tr>
+                  <th className="px-4 py-3 text-center">选择</th>
+                  <th className="px-4 py-3 text-left">ID</th>
+                  <th className="px-4 py-3 text-left">名称</th>
+                  <th className="px-4 py-3 text-center">地市/片区</th>
+                  <th className="px-4 py-3 text-center">车流(加油/访客)</th>
+                  <th className="px-4 py-3 text-center">波动率</th>
+                  <th className="px-4 py-3 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredStations.map((station) => (
+                  <tr key={station.station_id} className="hover:bg-slate-50">
+                    <td className="px-4 py-3 text-center"><input type="checkbox" checked={selectedStationIds.includes(station.station_id)} onChange={() => toggleSelectStation(station.station_id)} /></td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-600">{station.station_id}</td>
+                    <td className="px-4 py-3">
+                      <div className="font-semibold text-slate-900">{station.name}</div>
+                      <div className="text-xs text-slate-500">{station.station_type || '-'}</div>
+                    </td>
+                    <td className="px-4 py-3 text-center text-xs text-slate-600">{station.city || '-'} / {station.district || '-'}</td>
+                    <td className="px-4 py-3 text-center font-mono">{station.fuel_vehicles_per_day}/{station.visitor_vehicles_per_day}</td>
+                    <td className="px-4 py-3 text-center font-mono">{(station.traffic_volatility * 100).toFixed(0)}%</td>
+                    <td className="px-4 py-3 text-right">
+                      <Link to={`/stations/${station.station_id}`} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50">详情</Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -1261,6 +1654,143 @@ const StationDetailPage = () => {
 const StoresPage = () => {
   const { state, dispatch } = React.useContext(StateContext);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkStatus, setBulkStatus] = useState<'planning' | 'constructing' | 'open' | 'closed'>('open');
+  const [bulkCloseOpen, setBulkCloseOpen] = useState(false);
+  const [bulkInvSalvage, setBulkInvSalvage] = useState(0.3);
+  const [bulkAssetSalvage, setBulkAssetSalvage] = useState(0.1);
+  const [bulkResultOpen, setBulkResultOpen] = useState(false);
+  const [bulkResults, setBulkResults] = useState<Array<{ store_id: string; ok: boolean; message: string }>>([]);
+  const [templateName, setTemplateName] = useState('默认模板');
+  const savedTemplates = useMemo(
+    () => (state.bulk_templates?.store_ops || []),
+    [state.bulk_templates]
+  );
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const allSelected = state.stores.length > 0 && selectedIds.length === state.stores.length;
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedIds([]);
+    } else {
+      setSelectedIds(state.stores.map((s) => s.store_id));
+    }
+  };
+
+  const runBulkClose = async () => {
+    if (selectedIds.length === 0) return;
+    if (!window.confirm(`确认批量关店 ${selectedIds.length} 家？`)) return;
+    setBulkBusy(true);
+    const res: Array<{ store_id: string; ok: boolean; message: string }> = [];
+    try {
+      for (const id of selectedIds) {
+        try {
+          await dispatch({
+            type: 'CLOSE_STORE',
+            payload: {
+              store_id: id,
+              inventory_salvage_rate: Math.max(0, Math.min(1, Number(bulkInvSalvage) || 0)),
+              asset_salvage_rate: Math.max(0, Math.min(1, Number(bulkAssetSalvage) || 0)),
+            },
+          });
+          res.push({ store_id: id, ok: true, message: '关店成功' });
+        } catch (e: any) {
+          res.push({ store_id: id, ok: false, message: String(e?.message || e || '关店失败') });
+        }
+      }
+      setSelectedIds([]);
+      setBulkCloseOpen(false);
+      setBulkResults(res);
+      setBulkResultOpen(true);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const runBulkStatus = async () => {
+    if (selectedIds.length === 0) return;
+    setBulkBusy(true);
+    const res: Array<{ store_id: string; ok: boolean; message: string }> = [];
+    try {
+      for (const id of selectedIds) {
+        try {
+          await dispatch({ type: 'UPDATE_STORE', payload: { store_id: id, patch: { status: bulkStatus } } });
+          res.push({ store_id: id, ok: true, message: `状态已改为 ${bulkStatus}` });
+        } catch (e: any) {
+          res.push({ store_id: id, ok: false, message: String(e?.message || e || '状态修改失败') });
+        }
+      }
+      setSelectedIds([]);
+      setBulkResults(res);
+      setBulkResultOpen(true);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const saveTemplate = async () => {
+    const name = templateName.trim();
+    if (!name) return;
+    await dispatch({
+      type: 'UPSERT_STORE_BULK_TEMPLATE',
+      payload: {
+      name,
+      status: bulkStatus,
+      inv: Math.max(0, Math.min(1, Number(bulkInvSalvage) || 0)),
+      asset: Math.max(0, Math.min(1, Number(bulkAssetSalvage) || 0)),
+      },
+    });
+  };
+
+  const deleteTemplate = async (name: string) => {
+    await dispatch({ type: 'DELETE_STORE_BULK_TEMPLATE', payload: { name } });
+  };
+
+  const renameTemplate = async () => {
+    const oldName = templateName;
+    const exists = savedTemplates.find((t) => t.name === oldName);
+    if (!exists) {
+      alert('请先输入已存在的模板名');
+      return;
+    }
+    const newName = window.prompt('请输入新模板名', oldName)?.trim();
+    if (!newName || newName === oldName) return;
+    const next = await apiRenameStoreBulkTemplate(oldName, newName);
+    await dispatch({ type: 'SET_STATE', payload: next } as any);
+    setTemplateName(newName);
+  };
+
+  const exportTemplates = async () => {
+    const data = await apiExportStoreBulkTemplates();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `store-bulk-templates-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importTemplates = async (file: File, mode: 'merge' | 'replace') => {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const templates = Array.isArray(parsed?.templates) ? parsed.templates : [];
+    const next = await apiImportStoreBulkTemplates({ templates, mode });
+    await dispatch({ type: 'SET_STATE', payload: next } as any);
+  };
+
+  const applyTemplate = (name: string) => {
+    const t = savedTemplates.find((x) => x.name === name);
+    if (!t) return;
+    setBulkStatus(t.status);
+    setBulkInvSalvage(t.inv);
+    setBulkAssetSalvage(t.asset);
+    setTemplateName(t.name);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1319,9 +1849,79 @@ const StoresPage = () => {
       </div>
 
       <div className="space-y-4">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+            全选
+          </label>
+          <div className="text-sm text-slate-500">已选 {selectedIds.length} 家</div>
+          <div className="h-5 w-px bg-slate-200" />
+          <select value={bulkStatus} onChange={(e) => setBulkStatus(e.target.value as any)} className="h-9 rounded-lg border border-slate-300 px-2 text-sm">
+            <option value="planning">筹备中</option>
+            <option value="constructing">建设中</option>
+            <option value="open">营业中</option>
+            <option value="closed">已关闭</option>
+          </select>
+          <button onClick={runBulkStatus} disabled={bulkBusy || selectedIds.length === 0} className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold disabled:opacity-50">批量改状态</button>
+          <button onClick={() => setBulkCloseOpen(true)} disabled={bulkBusy || selectedIds.length === 0} className="h-9 px-3 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold disabled:opacity-50">批量关店</button>
+          <div className="h-5 w-px bg-slate-200" />
+          <input value={templateName} onChange={(e) => setTemplateName(e.target.value)} placeholder="模板名" className="h-9 w-28 rounded-lg border border-slate-300 px-2 text-xs" />
+          <button onClick={saveTemplate} className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold">保存模板</button>
+          <button onClick={renameTemplate} className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold">重命名</button>
+          <button onClick={() => deleteTemplate(templateName)} disabled={!savedTemplates.some((t) => t.name === templateName)} className="h-9 px-3 rounded-lg border border-rose-300 text-rose-600 text-sm font-semibold disabled:opacity-50">删除模板</button>
+          <select onChange={(e) => applyTemplate(e.target.value)} defaultValue="" className="h-9 rounded-lg border border-slate-300 px-2 text-sm">
+            <option value="">套用模板...</option>
+            {savedTemplates.map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
+          </select>
+          <button onClick={exportTemplates} className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold">导出JSON</button>
+          <label className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold inline-flex items-center cursor-pointer">
+            导入(合并)
+            <input
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={async (e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                try {
+                  await importTemplates(f, 'merge');
+                } catch (err: any) {
+                  alert(String(err?.message || err || '导入失败'));
+                }
+                e.currentTarget.value = '';
+              }}
+            />
+          </label>
+          <label className="h-9 px-3 rounded-lg border border-amber-300 text-amber-700 text-sm font-semibold inline-flex items-center cursor-pointer">
+            导入(覆盖)
+            <input
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={async (e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                if (!window.confirm('覆盖导入会替换现有模板，确认继续？')) {
+                  e.currentTarget.value = '';
+                  return;
+                }
+                try {
+                  await importTemplates(f, 'replace');
+                } catch (err: any) {
+                  alert(String(err?.message || err || '导入失败'));
+                }
+                e.currentTarget.value = '';
+              }}
+            />
+          </label>
+        </div>
+
         {state.stores.map((store) => (
           <div key={store.store_id} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow flex flex-col md:flex-row items-center justify-between gap-6">
             <div className="flex items-center gap-6 flex-1">
+              <label className="self-start md:self-center">
+                <input type="checkbox" checked={selectedIds.includes(store.store_id)} onChange={() => toggleSelect(store.store_id)} />
+              </label>
               <div className="h-16 w-16 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center shrink-0">
                 <span className="material-symbols-outlined text-3xl">storefront</span>
               </div>
@@ -2387,6 +2987,71 @@ const DataOpsPage = () => {
         <h1 className="text-2xl font-bold text-slate-900">测试数据导入导出</h1>
         <p className="text-slate-500 mt-1">已支持前端弹窗导入；也保留后端运维页入口。</p>
       </div>
+
+      {bulkCloseOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+              <h3 className="font-bold text-slate-800">批量关店参数</h3>
+              <button onClick={() => setBulkCloseOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="text-sm text-slate-600">将对已选 {selectedIds.length} 家门店执行关店处置。</div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">库存残值率 (0~1)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  max={1}
+                  value={bulkInvSalvage}
+                  onChange={(e) => setBulkInvSalvage(Number(e.target.value) || 0)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">资产残值率 (0~1)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  max={1}
+                  value={bulkAssetSalvage}
+                  onChange={(e) => setBulkAssetSalvage(Number(e.target.value) || 0)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono"
+                />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-2">
+              <button onClick={() => setBulkCloseOpen(false)} className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 text-sm font-medium">取消</button>
+              <button onClick={runBulkClose} disabled={bulkBusy} className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-sm font-medium disabled:opacity-50">确认关店</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bulkResultOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+              <h3 className="font-bold text-slate-800">批量执行结果</h3>
+              <button onClick={() => setBulkResultOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            <div className="p-4 max-h-[420px] overflow-auto space-y-2">
+              {bulkResults.map((r) => (
+                <div key={`${r.store_id}-${r.message}`} className={`text-sm rounded-lg px-3 py-2 border ${r.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700'}`}>
+                  [{r.store_id}] {r.message}
+                </div>
+              ))}
+              {bulkResults.length === 0 && <div className="text-sm text-slate-500">无结果</div>}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-6 space-y-4">
         <div className="text-sm text-slate-700">你可以上传或替换：</div>
@@ -3715,6 +4380,17 @@ export default function App() {
         }
         case 'UPDATE_FINANCE': {
           const next = await apiUpdateFinance(action.payload || {});
+          setState(next);
+          return;
+        }
+        case 'UPSERT_STORE_BULK_TEMPLATE': {
+          const next = await apiUpsertStoreBulkTemplate(action.payload);
+          setState(next);
+          return;
+        }
+        case 'DELETE_STORE_BULK_TEMPLATE': {
+          const { name } = action.payload as { name: string };
+          const next = await apiDeleteStoreBulkTemplate(name);
           setState(next);
           return;
         }

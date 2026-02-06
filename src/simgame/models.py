@@ -523,6 +523,21 @@ class DayResult:
 
 
 @dataclass
+class StoreBulkTemplate:
+    name: str
+    status: str = "open"
+    inventory_salvage_rate: float = 0.3
+    asset_salvage_rate: float = 0.1
+
+
+@dataclass
+class StationBulkTemplate:
+    name: str
+    fuel_factor: float = 1.0
+    visitor_factor: float = 1.0
+
+
+@dataclass
 class GameState:
     day: int = 1
     cash: float = 200_000.0
@@ -549,6 +564,10 @@ class GameState:
     budget_monthly_revenue_target: float = 0.0
     budget_monthly_profit_target: float = 0.0
     budget_monthly_cashflow_target: float = 0.0
+
+    # Shared UI templates
+    store_bulk_templates: List[StoreBulkTemplate] = field(default_factory=list)
+    station_bulk_templates: List[StationBulkTemplate] = field(default_factory=list)
 
     def month_day_index(self, month_len: int) -> int:
         # 1..month_len

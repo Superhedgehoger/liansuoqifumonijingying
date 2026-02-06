@@ -125,6 +125,68 @@ Base URL（本机默认）：`http://127.0.0.1:8000`
 - 返回：全量 `SimulationState`
 - 说明：`finance.budget_mtd` 会返回当月进度与 MTD 实际值
 
+### 批量模板（共享）
+
+### POST `/api/bulk-templates/store-ops`
+
+- Body：
+```json
+{
+  "name": "默认模板",
+  "status": "open",
+  "inv": 0.3,
+  "asset": 0.1
+}
+```
+
+### DELETE `/api/bulk-templates/store-ops/{name}`
+
+- 删除共享批量模板
+
+### PATCH `/api/bulk-templates/store-ops/{name}`
+
+- Body：`{ "new_name": "新模板名" }`
+- 重命名共享批量模板
+
+### GET `/api/bulk-templates/store-ops/export`
+
+- 返回：`{ "templates": [...] }`
+
+### POST `/api/bulk-templates/store-ops/import`
+
+- Body：`{ "templates": [...], "mode": "merge|replace" }`
+
+### 站点批量模板（共享）
+
+### POST `/api/bulk-templates/station-ops`
+
+- Body：
+```json
+{
+  "name": "节假日高峰",
+  "fuel_factor": 1.25,
+  "visitor_factor": 1.15
+}
+```
+
+### DELETE `/api/bulk-templates/station-ops/{name}`
+
+### PATCH `/api/bulk-templates/station-ops/{name}`
+
+- Body：`{ "new_name": "新模板名" }`
+
+### GET `/api/bulk-templates/station-ops/export`
+
+### POST `/api/bulk-templates/station-ops/import`
+
+- Body：`{ "templates": [...], "mode": "merge|replace" }`
+
+### 模板中心说明
+
+- `GET /api/state` 中 `bulk_templates` 同时返回：
+  - `store_ops`
+  - `station_ops`
+
 ### PUT `/api/stores/{store_id}`（workforce 扩展）
 
 - `workforce` 额外字段（P3-next）：
