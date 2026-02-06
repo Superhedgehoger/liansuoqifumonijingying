@@ -131,6 +131,44 @@ export function apiDeleteReplenishmentRule(store_id: string, sku: string): Promi
   });
 }
 
+async function uploadFile(url: string, file: File): Promise<void> {
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch(url, {
+    method: 'POST',
+    body: fd,
+    credentials: 'same-origin'
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '上传失败');
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+}
+
+export function apiImportStateFile(file: File): Promise<void> {
+  return uploadFile('/ops/import/state', file);
+}
+
+export function apiImportLedgerFile(file: File): Promise<void> {
+  return uploadFile('/ops/import/ledger', file);
+}
+
+export function apiUpdateFinance(payload: {
+  hq_credit_limit?: number;
+  hq_daily_interest_rate?: number;
+  hq_auto_finance?: boolean;
+  budget_monthly_revenue_target?: number;
+  budget_monthly_profit_target?: number;
+  budget_monthly_cashflow_target?: number;
+  manual_repay?: number;
+}): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/finance', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
 export function apiUpsertServiceLine(store_id: string, payload: any): Promise<SimulationState> {
   return requestJson<SimulationState>(`/api/stores/${encodeURIComponent(store_id)}/services`, {
     method: 'POST',

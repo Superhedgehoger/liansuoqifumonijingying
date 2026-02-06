@@ -28,6 +28,8 @@ import {
   apiDeleteServiceLine,
   apiDeleteStation,
   apiGetState,
+  apiImportLedgerFile,
+  apiImportStateFile,
   apiGetSiteRecommendations,
   apiInjectEvent,
   apiPurchaseInventory,
@@ -41,6 +43,7 @@ import {
   apiUpsertEventTemplate,
   apiUpsertProject,
   apiUpsertRole,
+  apiUpdateFinance,
   apiUpsertServiceLine
 } from './services/api';
 import {
@@ -80,6 +83,7 @@ const Sidebar = () => {
     { name: '策略实验', path: '/strategy', icon: 'experiment' },
     { name: '财务报表', path: '/reports', icon: 'analytics' },
     { name: '地图分析', path: '/gis', icon: 'map' },
+    { name: '数据导入', path: '/data', icon: 'upload_file' },
   ];
 
   return (
@@ -122,10 +126,79 @@ const Sidebar = () => {
   );
 };
 
+const ImportDataModal = ({
+  onClose,
+  onImported,
+}: {
+  onClose: () => void;
+  onImported: () => Promise<void>;
+}) => {
+  const [stateFile, setStateFile] = useState<File | null>(null);
+  const [ledgerFile, setLedgerFile] = useState<File | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState<string>('');
+
+  const doImport = async () => {
+    if (!stateFile && !ledgerFile) {
+      setMsg('请至少选择一个文件');
+      return;
+    }
+    setLoading(true);
+    setMsg('');
+    try {
+      if (stateFile) await apiImportStateFile(stateFile);
+      if (ledgerFile) await apiImportLedgerFile(ledgerFile);
+      await onImported();
+      setMsg('导入成功');
+    } catch (e: any) {
+      setMsg(String(e?.message || e || '导入失败'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
+        <div className="p-6 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <div className="text-lg font-bold text-slate-900">导入测试数据</div>
+            <div className="text-xs text-slate-500 mt-1">可上传 `state.json` 与 `ledger.csv`，立即覆盖当前数据。</div>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-900">
+            <span className="material-symbols-outlined">close</span>
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          <div>
+            <div className="text-xs font-bold text-slate-500 uppercase mb-1">state.json</div>
+            <input type="file" accept="application/json,.json" onChange={(e) => setStateFile(e.target.files?.[0] || null)} className="block w-full text-sm" />
+          </div>
+          <div>
+            <div className="text-xs font-bold text-slate-500 uppercase mb-1">ledger.csv</div>
+            <input type="file" accept="text/csv,.csv" onChange={(e) => setLedgerFile(e.target.files?.[0] || null)} className="block w-full text-sm" />
+          </div>
+          <div className="text-xs text-slate-500">生成与导入后的文件都在：`data/state.json`、`data/ledger.csv`、`data/snapshots/`（项目根目录）。</div>
+          {msg && <div className="text-sm text-slate-700 bg-slate-100 rounded-lg px-3 py-2">{msg}</div>}
+        </div>
+
+        <div className="p-6 border-t border-slate-200 bg-slate-50 flex justify-end gap-2">
+          <button onClick={onClose} className="h-10 px-4 rounded-lg border border-slate-300 bg-white text-slate-700 font-semibold">关闭</button>
+          <button onClick={doImport} disabled={loading} className="h-10 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold disabled:opacity-60">
+            {loading ? '导入中...' : '开始导入'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const Header = () => {
   const { state, dispatch } = React.useContext(StateContext);
   const [isSimulating, setIsSimulating] = useState(false);
   const [daysInput, setDaysInput] = useState<number>(7);
+  const [importOpen, setImportOpen] = useState(false);
   const location = useLocation();
 
   // Hide main header on GIS page
@@ -171,6 +244,7 @@ const Header = () => {
   ];
 
   return (
+    <>
     <header className="bg-white border-b border-slate-200 h-16 px-8 flex items-center justify-between sticky top-0 z-10 shadow-sm">
       <div className="flex items-center gap-6">
         <h2 className="text-xl font-bold text-slate-800">第 {state.day} 天</h2>
@@ -185,6 +259,16 @@ const Header = () => {
           <p className="text-lg font-mono font-bold text-slate-800">
             ¥{state.cash.toLocaleString()}
           </p>
+        </div>
+
+        <div className="hidden md:flex items-center gap-2">
+          <button
+            onClick={() => setImportOpen(true)}
+            className="h-9 px-3 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold hover:bg-white hover:shadow-sm"
+            title="打开测试数据导入弹窗"
+          >
+            导入/导出
+          </button>
         </div>
         
         <div className="flex items-center bg-slate-100 p-1 rounded-lg">
@@ -232,6 +316,16 @@ const Header = () => {
         </div>
       </div>
     </header>
+    {importOpen && (
+      <ImportDataModal
+        onClose={() => setImportOpen(false)}
+        onImported={async () => {
+          const next = await apiGetState();
+          await dispatch({ type: 'SET_STATE', payload: next } as any);
+        }}
+      />
+    )}
+    </>
   );
 };
 
@@ -2283,6 +2377,70 @@ const ReportsPage = () => {
   );
 };
 
+const DataOpsPage = () => {
+  const { dispatch } = React.useContext(StateContext);
+  const [importOpen, setImportOpen] = useState(false);
+
+  return (
+    <div className="p-8 max-w-5xl mx-auto space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-slate-900">测试数据导入导出</h1>
+        <p className="text-slate-500 mt-1">已支持前端弹窗导入；也保留后端运维页入口。</p>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-6 space-y-4">
+        <div className="text-sm text-slate-700">你可以上传或替换：</div>
+        <ul className="list-disc pl-6 text-sm text-slate-600 space-y-1">
+          <li>`state.json`（全量模拟状态）</li>
+          <li>`ledger.csv`（流水明细）</li>
+        </ul>
+        <div className="flex flex-wrap gap-3 pt-2">
+          <button
+            onClick={() => setImportOpen(true)}
+            className="h-10 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold inline-flex items-center"
+          >
+            前端弹窗导入
+          </button>
+          <a
+            href="http://127.0.0.1:8000/ops"
+            target="_blank"
+            rel="noreferrer"
+            className="h-10 px-4 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold inline-flex items-center"
+          >
+            打开后端 /ops
+          </a>
+          <a
+            href="/download/state"
+            target="_blank"
+            rel="noreferrer"
+            className="h-10 px-4 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold inline-flex items-center hover:bg-slate-50"
+          >
+            下载 state.json
+          </a>
+          <a
+            href="/download/ledger"
+            target="_blank"
+            rel="noreferrer"
+            className="h-10 px-4 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold inline-flex items-center hover:bg-slate-50"
+          >
+            下载 ledger.csv
+          </a>
+        </div>
+      </div>
+
+      {importOpen && (
+        <ImportDataModal
+          onClose={() => setImportOpen(false)}
+          onImported={async () => {
+            const next = await apiGetState();
+            await dispatch({ type: 'SET_STATE', payload: next } as any);
+          }}
+        />
+      )}
+    </div>
+  );
+};
+
 const EventsPage = () => {
   const { state, dispatch } = React.useContext(StateContext);
   const events = state.events;
@@ -2949,9 +3107,9 @@ const StrategyPage = () => {
 
   const stores = useMemo(() => (state.stores || []).filter((s) => s.status === 'open'), [state.stores]);
   const defaultStore = stores[0]?.store_id || '';
-  const selectedStore = useMemo(() => stores.find((s) => s.store_id === selectedStoreId), [stores, selectedStoreId]);
 
   const [selectedStoreId, setSelectedStoreId] = useState(defaultStore);
+  const selectedStore = useMemo(() => stores.find((s) => s.store_id === selectedStoreId), [stores, selectedStoreId]);
   const [days, setDays] = useState(30);
   const [seed, setSeed] = useState<number>(state.events?.rng_seed ?? 20260101);
   const [compareLoading, setCompareLoading] = useState(false);
@@ -2967,6 +3125,44 @@ const StrategyPage = () => {
   const [mitigationDraft, setMitigationDraft] = useState<any>({});
   const [autoReplenEnabled, setAutoReplenEnabled] = useState(false);
   const [ruleDraft, setRuleDraft] = useState<any>({ sku: '', reorder_point: 50, safety_stock: 80, target_stock: 150, lead_time_days: 2, unit_cost: 0 });
+  const [workforceDraft, setWorkforceDraft] = useState<any>({});
+  const [financeDraft, setFinanceDraft] = useState<any>({});
+
+  const workforceBreakdown = useMemo(() => {
+    const shifts = Math.max(1, Number(workforceDraft.shifts_per_day ?? 2) || 1);
+    const perShift = Math.max(1, Number(workforceDraft.staffing_per_shift ?? 3) || 1);
+    const current = Math.max(0, Number(workforceDraft.current_headcount ?? 0) || 0);
+    const required = shifts * perShift;
+    const baseCoverage = required > 0 ? current / required : 1;
+    const overtimeEnabled = Boolean(workforceDraft.overtime_shift_enabled);
+    const overtimeExtra = Math.max(0, Number(workforceDraft.overtime_shift_extra_capacity ?? 0) || 0);
+    const finalCoverage = Math.min(1.2, Math.max(0, baseCoverage + (overtimeEnabled ? overtimeExtra : 0)));
+
+    const catSkill = workforceDraft.skill_by_category || {};
+    const catAlloc = workforceDraft.shift_allocation_by_category || {};
+    const roleSkill = workforceDraft.skill_by_role || {};
+    const roleAlloc = workforceDraft.shift_allocation_by_role || {};
+
+    const catRows = ['wash', 'maintenance', 'detailing', 'other'].map((k) => {
+      const s = Math.max(0, Number(catSkill[k] ?? 1) || 0);
+      const a = Math.max(0, Number(catAlloc[k] ?? 1) || 0);
+      return { key: k, factor: s * a };
+    });
+    const roleRows = ['技师', '店长', '销售', '客服'].map((k) => {
+      const s = Math.max(0, Number(roleSkill[k] ?? 1) || 0);
+      const a = Math.max(0, Number(roleAlloc[k] ?? 1) || 0);
+      return { key: k, factor: s * a };
+    });
+
+    return {
+      required,
+      current,
+      baseCoverage,
+      finalCoverage,
+      catRows,
+      roleRows,
+    };
+  }, [workforceDraft]);
 
   useEffect(() => {
     if (!selectedStoreId && defaultStore) setSelectedStoreId(defaultStore);
@@ -2976,7 +3172,12 @@ const StrategyPage = () => {
     if (!selectedStore) return;
     setMitigationDraft({ ...(selectedStore.mitigation || {}) });
     setAutoReplenEnabled(Boolean(selectedStore.auto_replenishment_enabled));
+    setWorkforceDraft({ ...(selectedStore.workforce || {}) });
   }, [selectedStore]);
+
+  useEffect(() => {
+    setFinanceDraft({ ...(state.finance || {}) });
+  }, [state.finance]);
 
   const loadRecommendations = async () => {
     setLoadingRec(true);
@@ -3064,9 +3265,14 @@ const StrategyPage = () => {
         patch: {
           auto_replenishment_enabled: autoReplenEnabled,
           mitigation: mitigationDraft,
+          workforce: workforceDraft,
         },
       },
     });
+  };
+
+  const saveFinance = async () => {
+    await dispatch({ type: 'UPDATE_FINANCE', payload: financeDraft });
   };
 
   const upsertRule = async () => {
@@ -3187,6 +3393,46 @@ const StrategyPage = () => {
                   <label>扩容倍率<input type="number" step="0.05" value={Number(mitigationDraft.overtime_capacity_boost ?? 1.2)} onChange={(e)=>setMitigationDraft((p:any)=>({...p,overtime_capacity_boost:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
                   <label>加班日成本<input type="number" value={Number(mitigationDraft.overtime_daily_cost ?? 100)} onChange={(e)=>setMitigationDraft((p:any)=>({...p,overtime_daily_cost:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
                 </div>
+
+                <div className="pt-3 border-t border-slate-200 mt-2">
+                  <div className="font-semibold text-slate-800 mb-2">P3 人力生命周期</div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <label>编制<input type="number" value={Number(workforceDraft.planned_headcount ?? 6)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,planned_headcount:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>当前人数<input type="number" value={Number(workforceDraft.current_headcount ?? 6)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,current_headcount:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>培训水平<input type="number" step="0.05" min={0} max={1} value={Number(workforceDraft.training_level ?? 0.5)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,training_level:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>流失率/日<input type="number" step="0.001" min={0} max={1} value={Number(workforceDraft.daily_turnover_rate ?? 0.002)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,daily_turnover_rate:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label className="col-span-2 flex items-center gap-2 mt-6"><input type="checkbox" checked={Boolean(workforceDraft.recruiting_enabled)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,recruiting_enabled:e.target.checked}))}/>启用招聘</label>
+                    <label>招聘预算/日<input type="number" value={Number(workforceDraft.recruiting_daily_budget ?? 0)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,recruiting_daily_budget:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>招聘提前期<input type="number" value={Number(workforceDraft.recruiting_lead_days ?? 7)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,recruiting_lead_days:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>转化率/100元<input type="number" step="0.01" value={Number(workforceDraft.recruiting_hire_rate_per_100_budget ?? 0.2)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,recruiting_hire_rate_per_100_budget:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>班次数/日<input type="number" min={1} value={Number(workforceDraft.shifts_per_day ?? 2)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shifts_per_day:Number(e.target.value)||1}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>每班配置<input type="number" min={1} value={Number(workforceDraft.staffing_per_shift ?? 3)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,staffing_per_shift:Number(e.target.value)||1}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>班次时长<input type="number" min={1} value={Number(workforceDraft.shift_hours ?? 8)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shift_hours:Number(e.target.value)||1}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label className="col-span-2 flex items-center gap-2 mt-1"><input type="checkbox" checked={Boolean(workforceDraft.overtime_shift_enabled)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,overtime_shift_enabled:e.target.checked}))}/>启用加班班次</label>
+                    <label>加班产能补偿<input type="number" step="0.01" min={0} value={Number(workforceDraft.overtime_shift_extra_capacity ?? 0.15)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,overtime_shift_extra_capacity:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>加班成本/日<input type="number" min={0} value={Number(workforceDraft.overtime_shift_daily_cost ?? 0)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,overtime_shift_daily_cost:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <div className="col-span-3 mt-2 text-[11px] font-bold text-slate-500 uppercase">技能矩阵（按业态）</div>
+                    <label>洗车技能<input type="number" step="0.05" min={0} value={Number(workforceDraft.skill_by_category?.wash ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,skill_by_category:{...(p.skill_by_category||{}),wash:Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>维保技能<input type="number" step="0.05" min={0} value={Number(workforceDraft.skill_by_category?.maintenance ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,skill_by_category:{...(p.skill_by_category||{}),maintenance:Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>洗美技能<input type="number" step="0.05" min={0} value={Number(workforceDraft.skill_by_category?.detailing ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,skill_by_category:{...(p.skill_by_category||{}),detailing:Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>其他技能<input type="number" step="0.05" min={0} value={Number(workforceDraft.skill_by_category?.other ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,skill_by_category:{...(p.skill_by_category||{}),other:Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <div className="col-span-3 mt-2 text-[11px] font-bold text-slate-500 uppercase">班次分配（按业态）</div>
+                    <label>洗车分配<input type="number" step="0.05" min={0} value={Number(workforceDraft.shift_allocation_by_category?.wash ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shift_allocation_by_category:{...(p.shift_allocation_by_category||{}),wash:Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>维保分配<input type="number" step="0.05" min={0} value={Number(workforceDraft.shift_allocation_by_category?.maintenance ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shift_allocation_by_category:{...(p.shift_allocation_by_category||{}),maintenance:Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>洗美分配<input type="number" step="0.05" min={0} value={Number(workforceDraft.shift_allocation_by_category?.detailing ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shift_allocation_by_category:{...(p.shift_allocation_by_category||{}),detailing:Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>其他分配<input type="number" step="0.05" min={0} value={Number(workforceDraft.shift_allocation_by_category?.other ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shift_allocation_by_category:{...(p.shift_allocation_by_category||{}),other:Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <div className="col-span-3 mt-2 text-[11px] font-bold text-slate-500 uppercase">岗位技能（按 labor_role）</div>
+                    <label>技师技能<input type="number" step="0.05" min={0} value={Number(workforceDraft.skill_by_role?.['技师'] ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,skill_by_role:{...(p.skill_by_role||{}),'技师':Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>店长技能<input type="number" step="0.05" min={0} value={Number(workforceDraft.skill_by_role?.['店长'] ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,skill_by_role:{...(p.skill_by_role||{}),'店长':Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>销售技能<input type="number" step="0.05" min={0} value={Number(workforceDraft.skill_by_role?.['销售'] ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,skill_by_role:{...(p.skill_by_role||{}),'销售':Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>客服技能<input type="number" step="0.05" min={0} value={Number(workforceDraft.skill_by_role?.['客服'] ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,skill_by_role:{...(p.skill_by_role||{}),'客服':Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <div className="col-span-3 mt-2 text-[11px] font-bold text-slate-500 uppercase">岗位班次分配（按 labor_role）</div>
+                    <label>技师分配<input type="number" step="0.05" min={0} value={Number(workforceDraft.shift_allocation_by_role?.['技师'] ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shift_allocation_by_role:{...(p.shift_allocation_by_role||{}),'技师':Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>店长分配<input type="number" step="0.05" min={0} value={Number(workforceDraft.shift_allocation_by_role?.['店长'] ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shift_allocation_by_role:{...(p.shift_allocation_by_role||{}),'店长':Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>销售分配<input type="number" step="0.05" min={0} value={Number(workforceDraft.shift_allocation_by_role?.['销售'] ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shift_allocation_by_role:{...(p.shift_allocation_by_role||{}),'销售':Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>客服分配<input type="number" step="0.05" min={0} value={Number(workforceDraft.shift_allocation_by_role?.['客服'] ?? 1)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shift_allocation_by_role:{...(p.shift_allocation_by_role||{}),'客服':Number(e.target.value)||0}}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                  </div>
+                </div>
               </>
             )}
           </div>
@@ -3227,6 +3473,69 @@ const StrategyPage = () => {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200">
+          <div className="font-bold text-slate-900">P3 总部融资与预警</div>
+          <div className="text-xs text-slate-500 mt-1">授信额度、日利率、自动融资和风险提示。</div>
+        </div>
+        <div className="p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <label>授信额度<input type="number" value={Number(financeDraft.hq_credit_limit ?? 0)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,hq_credit_limit:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+            <label>日利率<input type="number" step="0.0001" value={Number(financeDraft.hq_daily_interest_rate ?? 0.0005)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,hq_daily_interest_rate:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+            <label>月营收预算<input type="number" value={Number(financeDraft.budget_monthly_revenue_target ?? 0)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,budget_monthly_revenue_target:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+            <label>月利润预算<input type="number" value={Number(financeDraft.budget_monthly_profit_target ?? 0)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,budget_monthly_profit_target:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+            <label className="col-span-2">月现金流预算<input type="number" value={Number(financeDraft.budget_monthly_cashflow_target ?? 0)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,budget_monthly_cashflow_target:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+            <label className="col-span-2 flex items-center gap-2"><input type="checkbox" checked={Boolean(financeDraft.hq_auto_finance)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,hq_auto_finance:e.target.checked}))}/>自动融资（现金为负时自动提额）</label>
+            <button onClick={saveFinance} className="h-9 px-3 rounded-lg bg-slate-900 text-white text-xs font-semibold w-fit">保存融资策略</button>
+            <div className="col-span-2 text-sm text-slate-600">当前授信占用：{Number(state.finance?.hq_credit_used ?? 0).toFixed(2)} / {Number(state.finance?.hq_credit_limit ?? 0).toFixed(2)}</div>
+            <div className="col-span-2 text-sm text-slate-600">
+              本月进度：{((Number(state.finance?.budget_mtd?.progress ?? 0) * 100)).toFixed(1)}% ｜
+              营收 {Number(state.finance?.budget_mtd?.revenue ?? 0).toFixed(0)} ｜
+              利润 {Number(state.finance?.budget_mtd?.profit ?? 0).toFixed(0)} ｜
+              现金流 {Number(state.finance?.budget_mtd?.cashflow ?? 0).toFixed(0)}
+            </div>
+          </div>
+          <div>
+            <div className="font-semibold text-slate-800 mb-2">风险预警</div>
+            <div className="space-y-2 max-h-48 overflow-auto">
+              {(state.insights?.alerts || []).map((a, idx) => (
+                <div key={`${a.code}-${idx}`} className={`text-xs rounded-lg px-3 py-2 border ${a.level === 'high' ? 'bg-rose-50 border-rose-200 text-rose-700' : a.level === 'medium' ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
+                  [{a.code}] {a.message}
+                </div>
+              ))}
+              {(state.insights?.alerts || []).length === 0 && <div className="text-sm text-slate-500">暂无预警</div>}
+            </div>
+          </div>
+        </div>
+
+        <div className="px-6 pb-6">
+          <div className="rounded-xl border border-slate-200 p-4 bg-slate-50">
+            <div className="font-semibold text-slate-800 mb-2">人力产能分解（预览）</div>
+            <div className="text-xs text-slate-600 mb-3">
+              需求编制 {workforceBreakdown.required} 人 / 当前 {workforceBreakdown.current} 人，覆盖率 {Math.max(0, workforceBreakdown.baseCoverage * 100).toFixed(1)}% → 含加班 {Math.max(0, workforceBreakdown.finalCoverage * 100).toFixed(1)}%
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <div className="text-xs font-bold text-slate-500 uppercase mb-1">业态因子</div>
+                <div className="space-y-1 text-xs">
+                  {workforceBreakdown.catRows.map((r) => (
+                    <div key={r.key} className="flex justify-between"><span>{r.key}</span><span className={`font-mono ${r.factor < 1 ? 'text-rose-600' : r.factor > 1 ? 'text-emerald-600' : 'text-slate-700'}`}>{r.factor.toFixed(3)}</span></div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs font-bold text-slate-500 uppercase mb-1">岗位因子</div>
+                <div className="space-y-1 text-xs">
+                  {workforceBreakdown.roleRows.map((r) => (
+                    <div key={r.key} className="flex justify-between"><span>{r.key}</span><span className={`font-mono ${r.factor < 1 ? 'text-rose-600' : r.factor > 1 ? 'text-emerald-600' : 'text-slate-700'}`}>{r.factor.toFixed(3)}</span></div>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -3332,6 +3641,10 @@ export default function App() {
   const dispatch = async (action: { type: string; payload?: any }) => {
     try {
       switch (action.type) {
+        case 'SET_STATE': {
+          setState(action.payload as SimulationState);
+          return;
+        }
         case 'SIMULATE_DAY': {
           const days = action.payload || 1;
           const next = await apiSimulate(days);
@@ -3397,6 +3710,11 @@ export default function App() {
         case 'DELETE_REPL_RULE': {
           const { store_id, sku } = action.payload as any;
           const next = await apiDeleteReplenishmentRule(store_id, sku);
+          setState(next);
+          return;
+        }
+        case 'UPDATE_FINANCE': {
+          const next = await apiUpdateFinance(action.payload || {});
           setState(next);
           return;
         }
@@ -3494,6 +3812,7 @@ export default function App() {
                 <Route path="/stations/:id" element={<StationDetailPage />} />
                 <Route path="/stores" element={<StoresPage />} />
                 <Route path="/stores/:id" element={<StoreDetailPage />} />
+                <Route path="/data" element={<DataOpsPage />} />
                 <Route path="/events" element={<EventsPage />} />
                 <Route path="/strategy" element={<StrategyPage />} />
                 <Route path="/reports" element={<ReportsPage />} />

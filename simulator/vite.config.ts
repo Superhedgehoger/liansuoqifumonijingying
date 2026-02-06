@@ -10,7 +10,8 @@ export default defineConfig(({ mode }) => {
         host: '0.0.0.0',
         proxy: {
           '/api': 'http://127.0.0.1:8000',
-          '/download': 'http://127.0.0.1:8000'
+          '/download': 'http://127.0.0.1:8000',
+          '/ops': 'http://127.0.0.1:8000'
         }
       },
       plugins: [react()],

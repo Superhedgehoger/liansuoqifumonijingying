@@ -1,5 +1,19 @@
 # 更新日志
 
+## 0.7.4
+
+- 完成 P2 收口并启动 P3：
+  - 人力生命周期基础：编制/在岗/培训、日流失、招聘预算与提前期（pending hires）
+  - 总部融资基础：`hq_credit_limit`、`hq_daily_interest_rate`、`hq_auto_finance`、自动还款
+  - BI 预警基础：现金、授信占用、人手缺口、安全库存预警（`insights.alerts`）
+- 新增 API：`PUT /api/finance`
+- P3-next：新增班次排班参数（班次数/每班配置/加班班次），接入产能因子计算
+- P3-next：新增技能矩阵与业态分配（`skill_by_category` / `shift_allocation_by_category`），服务线产能按业态细分
+- P3-next：新增岗位技能/岗位班次分配（`skill_by_role` / `shift_allocation_by_role`），对 `labor_role` 服务线做精细产能修正
+- 审计增强：日流水新增 `workforce_breakdown_json`，记录人力产能分解快照
+- 预算扩展：`/api/finance` 支持月度预算目标，`finance.budget_mtd` 返回当月进度与 MTD 实际
+- 日流水增强：新增人力与补货/对冲相关审计字段
+
 ## 0.7.3
 
 - 完成 P2 中期能力：

@@ -15,6 +15,7 @@ from simgame.models import (
     EventTemplate,
     GameState,
     InventoryItem,
+    PendingHire,
     PendingInbound,
     ReplenishmentRule,
     ServiceLine,
@@ -184,6 +185,15 @@ def _role_headcount(store: Store, role: str) -> int:
     return max(0, int(rp.headcount))
 
 
+def _role_capacity_factor(store: Store, role: str) -> float:
+    wf = getattr(store, "workforce", None)
+    if wf is None:
+        return 1.0
+    s = float((getattr(wf, "skill_by_role", {}) or {}).get(str(role), 1.0) or 1.0)
+    a = float((getattr(wf, "shift_allocation_by_role", {}) or {}).get(str(role), 1.0) or 1.0)
+    return max(0.2, min(2.0, s * a))
+
+
 def _service_effective_capacity(store: Store, line: ServiceLine, cfg: EngineConfig, capacity_multiplier: float = 1.0) -> int:
     cap = max(0, int(line.capacity_per_day))
     if not line.labor_role or line.labor_hours_per_order <= 0:
@@ -191,7 +201,8 @@ def _service_effective_capacity(store: Store, line: ServiceLine, cfg: EngineConf
     hc = _role_headcount(store, line.labor_role)
     if hc <= 0:
         return 0
-    hours = float(hc) * float(cfg.hours_per_staff_per_day)
+    role_factor = _role_capacity_factor(store, str(line.labor_role))
+    hours = float(hc) * float(cfg.hours_per_staff_per_day) * float(role_factor)
     derived = int(hours // float(line.labor_hours_per_order))
     out = max(0, min(cap, derived))
     out = int(round(float(out) * max(0.0, float(capacity_multiplier))))
@@ -707,6 +718,7 @@ def _orders_for_store(
     cfg: EngineConfig,
     conversion_multiplier: float = 1.0,
     capacity_multiplier: float = 1.0,
+    category_capacity_factors: Dict[str, float] | None = None,
 ) -> Dict[str, int]:
     """Compute feasible orders per service line.
 
@@ -760,7 +772,16 @@ def _orders_for_store(
     desired_int: Dict[str, int] = {}
     for sid, line in store.service_lines.items():
         desired = int(round(raw[sid] * scale))
-        eff_cap = _service_effective_capacity(store, line, cfg=cfg, capacity_multiplier=capacity_multiplier)
+        cat = str(getattr(line, "category", "other") or "other")
+        cat_factor = 1.0
+        if category_capacity_factors is not None:
+            cat_factor = max(0.0, float(category_capacity_factors.get(cat, 1.0) or 1.0))
+        eff_cap = _service_effective_capacity(
+            store,
+            line,
+            cfg=cfg,
+            capacity_multiplier=float(capacity_multiplier) * float(cat_factor),
+        )
         desired = max(0, min(int(eff_cap), desired))
         desired_int[sid] = desired
 
@@ -960,6 +981,134 @@ def _auto_replenish(state: GameState, store: Store, day: int) -> tuple[float, li
     return total_cost, orders
 
 
+def _process_pending_hires(store: Store, day: int) -> int:
+    hired = 0
+    remain = []
+    for p in list(getattr(store, "pending_hires", []) or []):
+        qty = max(0, int(getattr(p, "qty", 0) or 0))
+        if int(getattr(p, "arrive_day", 0) or 0) <= int(day):
+            hired += qty
+        else:
+            remain.append(p)
+    store.pending_hires = remain
+    return hired
+
+
+def _sample_turnover(headcount: int, rate: float, rng: random.Random) -> int:
+    hc = max(0, int(headcount))
+    p = max(0.0, min(1.0, float(rate)))
+    out = 0
+    for _ in range(hc):
+        if rng.random() < p:
+            out += 1
+    return out
+
+
+def _workforce_daily(store: Store, day: int, rng: random.Random) -> tuple[int, int, float, float, float, float]:
+    wf = getattr(store, "workforce", None)
+    if wf is None:
+        return 0, 0, 0.0, 1.0, 1.0, 0.0
+
+    current = max(0, int(getattr(wf, "current_headcount", 0) or 0))
+    planned = max(1, int(getattr(wf, "planned_headcount", current if current > 0 else 1) or 1))
+    training = max(0.0, min(1.0, float(getattr(wf, "training_level", 0.5) or 0.0)))
+
+    hired = _process_pending_hires(store, day)
+    current += hired
+
+    lost = _sample_turnover(current, float(getattr(wf, "daily_turnover_rate", 0.0) or 0.0), rng)
+    current = max(0, current - lost)
+
+    recruit_cost = 0.0
+    if bool(getattr(wf, "recruiting_enabled", False)) and current < planned:
+        budget = max(0.0, float(getattr(wf, "recruiting_daily_budget", 0.0) or 0.0))
+        if budget > 0:
+            recruit_cost = budget
+            hire_lambda = (budget / 100.0) * max(
+                0.0, float(getattr(wf, "recruiting_hire_rate_per_100_budget", 0.20) or 0.0)
+            )
+            hire_qty = _poisson(hire_lambda, rng)
+            if hire_qty > 0:
+                lead = max(0, int(getattr(wf, "recruiting_lead_days", 7) or 0))
+                store.pending_hires.append(PendingHire(qty=hire_qty, order_day=int(day), arrive_day=int(day) + lead))
+
+    wf.current_headcount = current
+
+    # Capacity factor from staffing gap and training.
+    staffing_ratio = float(current) / float(planned)
+    base_factor = max(0.4, min(1.3, staffing_ratio * (0.8 + 0.4 * training)))
+
+    # Shift coverage factor (P3-next)
+    shifts = max(1, int(getattr(wf, "shifts_per_day", 2) or 1))
+    staffing = max(1, int(getattr(wf, "staffing_per_shift", 3) or 1))
+    required = float(shifts * staffing)
+    coverage = min(1.2, float(current) / required)
+    overtime_cost = 0.0
+    if coverage < 1.0 and bool(getattr(wf, "overtime_shift_enabled", False)):
+        extra = max(0.0, float(getattr(wf, "overtime_shift_extra_capacity", 0.15) or 0.0))
+        coverage = min(1.2, coverage + extra)
+        overtime_cost = max(0.0, float(getattr(wf, "overtime_shift_daily_cost", 0.0) or 0.0))
+
+    factor = max(0.3, min(1.4, base_factor * max(0.3, coverage)))
+    return lost, hired, recruit_cost, factor, coverage, overtime_cost
+
+
+def _workforce_category_capacity_factors(store: Store) -> Dict[str, float]:
+    wf = getattr(store, "workforce", None)
+    if wf is None:
+        return {"wash": 1.0, "maintenance": 1.0, "detailing": 1.0, "other": 1.0}
+    skills = getattr(wf, "skill_by_category", {}) or {}
+    alloc = getattr(wf, "shift_allocation_by_category", {}) or {}
+    out: Dict[str, float] = {}
+    for cat in ("wash", "maintenance", "detailing", "other"):
+        s = max(0.0, float(skills.get(cat, 1.0) or 0.0))
+        a = max(0.0, float(alloc.get(cat, 1.0) or 0.0))
+        out[cat] = max(0.2, min(2.0, s * a))
+    return out
+
+
+def _workforce_role_capacity_factors(store: Store) -> Dict[str, float]:
+    wf = getattr(store, "workforce", None)
+    if wf is None:
+        return {"技师": 1.0, "店长": 1.0, "销售": 1.0, "客服": 1.0}
+    skills = getattr(wf, "skill_by_role", {}) or {}
+    alloc = getattr(wf, "shift_allocation_by_role", {}) or {}
+    out: Dict[str, float] = {}
+    for role in ("技师", "店长", "销售", "客服"):
+        s = max(0.0, float(skills.get(role, 1.0) or 0.0))
+        a = max(0.0, float(alloc.get(role, 1.0) or 0.0))
+        out[role] = max(0.2, min(2.0, s * a))
+    return out
+
+
+def _apply_hq_finance(state: GameState, day_result: DayResult) -> None:
+    used = max(0.0, float(getattr(state, "hq_credit_used", 0.0) or 0.0))
+    rate = max(0.0, float(getattr(state, "hq_daily_interest_rate", 0.0) or 0.0))
+    if used > 0 and rate > 0:
+        interest = used * rate
+        state.cash -= interest
+        day_result.finance_interest_cost = float(interest)
+        day_result.total_net_cashflow -= float(interest)
+
+    if bool(getattr(state, "hq_auto_finance", False)):
+        limit = max(0.0, float(getattr(state, "hq_credit_limit", 0.0) or 0.0))
+        used = max(0.0, float(getattr(state, "hq_credit_used", 0.0) or 0.0))
+        room = max(0.0, limit - used)
+        if state.cash < 0 and room > 0:
+            draw = min(room, -float(state.cash))
+            state.cash += draw
+            state.hq_credit_used = used + draw
+            day_result.finance_credit_draw = float(draw)
+
+        used = max(0.0, float(getattr(state, "hq_credit_used", 0.0) or 0.0))
+        if state.cash > 0 and used > 0:
+            repay = min(used, float(state.cash) * 0.30)
+            if repay > 0:
+                state.cash -= repay
+                state.hq_credit_used = used - repay
+                day_result.finance_credit_repay = float(repay)
+
+
 def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
     rng = _rng_from_state(state)
 
@@ -1035,6 +1184,35 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
         ) = combine_event_effects_for_store(state, store)
         sr.event_summary_json = json.dumps(_ev_summary, ensure_ascii=False)
 
+        # Workforce lifecycle (P3)
+        wf = getattr(store, "workforce", None)
+        sr.workforce_headcount_start = int(getattr(wf, "current_headcount", 0) or 0) if wf else 0
+        wf_daily = _workforce_daily(store, state.day, rng)
+        sr.workforce_lost = int(wf_daily[0])
+        sr.workforce_hired = int(wf_daily[1])
+        sr.workforce_recruit_cost = float(wf_daily[2])
+        sr.workforce_capacity_factor = float(wf_daily[3])
+        sr.shift_coverage_ratio = float(wf_daily[4]) if len(wf_daily) > 4 else 1.0
+        sr.shift_overtime_cost = float(wf_daily[5]) if len(wf_daily) > 5 else 0.0
+        sr.workforce_recruit_cost += float(sr.shift_overtime_cost)
+        wf_cat_factors = _workforce_category_capacity_factors(store)
+        wf_role_factors = _workforce_role_capacity_factors(store)
+        if sr.workforce_capacity_factor > 0:
+            sr.capacity_multiplier *= float(sr.workforce_capacity_factor)
+        sr.workforce_breakdown_json = json.dumps(
+            {
+                "headcount_start": int(sr.workforce_headcount_start),
+                "headcount_end": int(sr.workforce_headcount_end),
+                "capacity_factor": float(sr.workforce_capacity_factor),
+                "shift_coverage_ratio": float(sr.shift_coverage_ratio),
+                "shift_overtime_cost": float(sr.shift_overtime_cost),
+                "category_factors": wf_cat_factors,
+                "role_factors": wf_role_factors,
+            },
+            ensure_ascii=False,
+        )
+        sr.workforce_headcount_end = int(getattr(getattr(store, "workforce", None), "current_headcount", 0) or 0)
+
         # Event mitigation actions
         mitigation_actions: list[dict] = []
         mit = getattr(store, "mitigation", None)
@@ -1099,6 +1277,7 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
                 cfg=cfg,
                 conversion_multiplier=float(sr.conversion_multiplier),
                 capacity_multiplier=float(sr.capacity_multiplier),
+                category_capacity_factors=wf_cat_factors,
             )
         sr.orders_by_service = orders_by_service
 
@@ -1331,6 +1510,7 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
         sr.cash_out += sr.labor_cost + sr.fixed_overhead + sr.cost_rent + sr.cost_water + sr.cost_elec
         # Auto replenishment is cash out (inventory asset), not P/L expense.
         sr.cash_out += float(sr.replenishment_cost)
+        sr.cash_out += float(sr.workforce_recruit_cost)
 
         state.cash += sr.cash_in
         state.cash -= sr.cash_out
@@ -1359,6 +1539,9 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
         day_result.total_net_cashflow += sr.net_cashflow
 
     state.ledger.append(day_result)
+
+    # HQ finance handling (P3)
+    _apply_hq_finance(state, day_result)
 
     # Persist RNG state so split runs stay reproducible.
     _persist_rng_state(state, rng)

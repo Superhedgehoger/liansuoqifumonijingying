@@ -57,6 +57,51 @@ export interface Store {
     order_day: number;
     arrive_day: number;
   }>;
+  workforce?: {
+    planned_headcount?: number;
+    current_headcount?: number;
+    training_level?: number;
+    daily_turnover_rate?: number;
+    recruiting_enabled?: boolean;
+    recruiting_daily_budget?: number;
+    recruiting_lead_days?: number;
+    recruiting_hire_rate_per_100_budget?: number;
+    shifts_per_day?: number;
+    staffing_per_shift?: number;
+    shift_hours?: number;
+    overtime_shift_enabled?: boolean;
+    overtime_shift_extra_capacity?: number;
+    overtime_shift_daily_cost?: number;
+    skill_by_category?: {
+      wash?: number;
+      maintenance?: number;
+      detailing?: number;
+      other?: number;
+    };
+    shift_allocation_by_category?: {
+      wash?: number;
+      maintenance?: number;
+      detailing?: number;
+      other?: number;
+    };
+    skill_by_role?: {
+      技师?: number;
+      店长?: number;
+      销售?: number;
+      客服?: number;
+    };
+    shift_allocation_by_role?: {
+      技师?: number;
+      店长?: number;
+      销售?: number;
+      客服?: number;
+    };
+  };
+  pending_hires?: Array<{
+    qty: number;
+    order_day: number;
+    arrive_day: number;
+  }>;
   labor_hour_price?: number;
   capex_total: number;
   capex_useful_life_days: number;
@@ -168,6 +213,27 @@ export interface PayrollRole {
 export interface SimulationState {
   day: number;
   cash: number;
+  finance?: {
+    hq_credit_limit: number;
+    hq_credit_used: number;
+    hq_daily_interest_rate: number;
+    hq_auto_finance: boolean;
+    budget_monthly_revenue_target?: number;
+    budget_monthly_profit_target?: number;
+    budget_monthly_cashflow_target?: number;
+    budget_mtd?: {
+      month_start_day: number;
+      month_end_day: number;
+      day_in_month: number;
+      progress: number;
+      revenue: number;
+      profit: number;
+      cashflow: number;
+    };
+  };
+  insights?: {
+    alerts: Array<{ level: string; code: string; message: string }>;
+  };
   stations: Station[];
   stores: Store[];
   ledger: LedgerEntry[];

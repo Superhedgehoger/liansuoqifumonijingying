@@ -244,6 +244,45 @@ class PendingInbound:
 
 
 @dataclass
+class PendingHire:
+    qty: int
+    order_day: int
+    arrive_day: int
+
+
+@dataclass
+class WorkforceConfig:
+    planned_headcount: int = 6
+    current_headcount: int = 6
+    training_level: float = 0.5  # 0..1
+    daily_turnover_rate: float = 0.002
+    recruiting_enabled: bool = False
+    recruiting_daily_budget: float = 0.0
+    recruiting_lead_days: int = 7
+    recruiting_hire_rate_per_100_budget: float = 0.20
+
+    # P3-next: shift scheduling
+    shifts_per_day: int = 2
+    staffing_per_shift: int = 3
+    shift_hours: float = 8.0
+    overtime_shift_enabled: bool = False
+    overtime_shift_extra_capacity: float = 0.15
+    overtime_shift_daily_cost: float = 0.0
+    skill_by_category: Dict[str, float] = field(
+        default_factory=lambda: {"wash": 1.0, "maintenance": 1.0, "detailing": 1.0, "other": 1.0}
+    )
+    shift_allocation_by_category: Dict[str, float] = field(
+        default_factory=lambda: {"wash": 1.0, "maintenance": 1.0, "detailing": 1.0, "other": 1.0}
+    )
+    skill_by_role: Dict[str, float] = field(
+        default_factory=lambda: {"技师": 1.0, "店长": 1.0, "销售": 1.0, "客服": 1.0}
+    )
+    shift_allocation_by_role: Dict[str, float] = field(
+        default_factory=lambda: {"技师": 1.0, "店长": 1.0, "销售": 1.0, "客服": 1.0}
+    )
+
+
+@dataclass
 class EventTemplate:
     template_id: str
     name: str
@@ -362,6 +401,10 @@ class Store:
     replenishment_rules: Dict[str, ReplenishmentRule] = field(default_factory=dict)
     pending_inbounds: List[PendingInbound] = field(default_factory=list)
 
+    # P3: workforce lifecycle
+    workforce: WorkforceConfig = field(default_factory=WorkforceConfig)
+    pending_hires: List[PendingHire] = field(default_factory=list)
+
     # If true, projects must be fulfilled with inventory parts; otherwise fallback to cost ratio.
     strict_parts: bool = True
 
@@ -442,6 +485,15 @@ class DayStoreResult:
     replenishment_cost: float = 0.0
     replenishment_orders_json: str = "[]"
     inbound_arrivals_json: str = "[]"
+    workforce_lost: int = 0
+    workforce_hired: int = 0
+    workforce_recruit_cost: float = 0.0
+    workforce_headcount_start: int = 0
+    workforce_headcount_end: int = 0
+    workforce_capacity_factor: float = 1.0
+    shift_coverage_ratio: float = 1.0
+    shift_overtime_cost: float = 0.0
+    workforce_breakdown_json: str = "{}"
     revenue: float = 0.0
     variable_cost: float = 0.0
     parts_cogs: float = 0.0
@@ -464,6 +516,11 @@ class DayResult:
     total_operating_profit: float = 0.0
     total_net_cashflow: float = 0.0
 
+    # P3: HQ finance
+    finance_interest_cost: float = 0.0
+    finance_credit_draw: float = 0.0
+    finance_credit_repay: float = 0.0
+
 
 @dataclass
 class GameState:
@@ -483,6 +540,15 @@ class GameState:
     active_events: List[ActiveEvent] = field(default_factory=list)
     event_history: List[EventHistoryRecord] = field(default_factory=list)
     event_cooldowns: Dict[str, int] = field(default_factory=dict)
+
+    # P3: HQ financing
+    hq_credit_limit: float = 0.0
+    hq_credit_used: float = 0.0
+    hq_daily_interest_rate: float = 0.0005
+    hq_auto_finance: bool = False
+    budget_monthly_revenue_target: float = 0.0
+    budget_monthly_profit_target: float = 0.0
+    budget_monthly_cashflow_target: float = 0.0
 
     def month_day_index(self, month_len: int) -> int:
         # 1..month_len

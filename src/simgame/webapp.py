@@ -39,7 +39,14 @@ _lock = threading.Lock()
 def _ensure_state() -> GameState:
     p = state_path()
     if p.exists():
-        return load_state(p)
+        try:
+            return load_state(p)
+        except Exception:
+            # Corrupted state file fallback: rebuild seed state.
+            try:
+                p.unlink()
+            except Exception:
+                pass
     # fall back to CLI seed via presets
     s = GameState()
     s.stations["S1"] = Station(station_id="S1", name="样例加油站", fuel_vehicles_per_day=700, visitor_vehicles_per_day=10)
@@ -613,6 +620,100 @@ def create_app() -> FastAPI:
                 }
                 for p in (getattr(st, "pending_inbounds", []) or [])
             ],
+            "workforce": {
+                "planned_headcount": int(getattr(getattr(st, "workforce", None), "planned_headcount", 0) or 0),
+                "current_headcount": int(getattr(getattr(st, "workforce", None), "current_headcount", 0) or 0),
+                "training_level": float(getattr(getattr(st, "workforce", None), "training_level", 0.5) or 0.0),
+                "daily_turnover_rate": float(
+                    getattr(getattr(st, "workforce", None), "daily_turnover_rate", 0.002) or 0.0
+                ),
+                "recruiting_enabled": bool(getattr(getattr(st, "workforce", None), "recruiting_enabled", False)),
+                "recruiting_daily_budget": float(
+                    getattr(getattr(st, "workforce", None), "recruiting_daily_budget", 0.0) or 0.0
+                ),
+                "recruiting_lead_days": int(
+                    getattr(getattr(st, "workforce", None), "recruiting_lead_days", 7) or 0
+                ),
+                "recruiting_hire_rate_per_100_budget": float(
+                    getattr(getattr(st, "workforce", None), "recruiting_hire_rate_per_100_budget", 0.20) or 0.0
+                ),
+                "shifts_per_day": int(getattr(getattr(st, "workforce", None), "shifts_per_day", 2) or 0),
+                "staffing_per_shift": int(getattr(getattr(st, "workforce", None), "staffing_per_shift", 3) or 0),
+                "shift_hours": float(getattr(getattr(st, "workforce", None), "shift_hours", 8.0) or 0.0),
+                "overtime_shift_enabled": bool(
+                    getattr(getattr(st, "workforce", None), "overtime_shift_enabled", False)
+                ),
+                "overtime_shift_extra_capacity": float(
+                    getattr(getattr(st, "workforce", None), "overtime_shift_extra_capacity", 0.15) or 0.0
+                ),
+                "overtime_shift_daily_cost": float(
+                    getattr(getattr(st, "workforce", None), "overtime_shift_daily_cost", 0.0) or 0.0
+                ),
+                "skill_by_category": {
+                    "wash": float(
+                        ((getattr(getattr(st, "workforce", None), "skill_by_category", {}) or {}).get("wash", 1.0))
+                    ),
+                    "maintenance": float(
+                        ((getattr(getattr(st, "workforce", None), "skill_by_category", {}) or {}).get("maintenance", 1.0))
+                    ),
+                    "detailing": float(
+                        ((getattr(getattr(st, "workforce", None), "skill_by_category", {}) or {}).get("detailing", 1.0))
+                    ),
+                    "other": float(
+                        ((getattr(getattr(st, "workforce", None), "skill_by_category", {}) or {}).get("other", 1.0))
+                    ),
+                },
+                "shift_allocation_by_category": {
+                    "wash": float(
+                        ((getattr(getattr(st, "workforce", None), "shift_allocation_by_category", {}) or {}).get("wash", 1.0))
+                    ),
+                    "maintenance": float(
+                        ((getattr(getattr(st, "workforce", None), "shift_allocation_by_category", {}) or {}).get("maintenance", 1.0))
+                    ),
+                    "detailing": float(
+                        ((getattr(getattr(st, "workforce", None), "shift_allocation_by_category", {}) or {}).get("detailing", 1.0))
+                    ),
+                    "other": float(
+                        ((getattr(getattr(st, "workforce", None), "shift_allocation_by_category", {}) or {}).get("other", 1.0))
+                    ),
+                },
+                "skill_by_role": {
+                    "技师": float(
+                        ((getattr(getattr(st, "workforce", None), "skill_by_role", {}) or {}).get("技师", 1.0))
+                    ),
+                    "店长": float(
+                        ((getattr(getattr(st, "workforce", None), "skill_by_role", {}) or {}).get("店长", 1.0))
+                    ),
+                    "销售": float(
+                        ((getattr(getattr(st, "workforce", None), "skill_by_role", {}) or {}).get("销售", 1.0))
+                    ),
+                    "客服": float(
+                        ((getattr(getattr(st, "workforce", None), "skill_by_role", {}) or {}).get("客服", 1.0))
+                    ),
+                },
+                "shift_allocation_by_role": {
+                    "技师": float(
+                        ((getattr(getattr(st, "workforce", None), "shift_allocation_by_role", {}) or {}).get("技师", 1.0))
+                    ),
+                    "店长": float(
+                        ((getattr(getattr(st, "workforce", None), "shift_allocation_by_role", {}) or {}).get("店长", 1.0))
+                    ),
+                    "销售": float(
+                        ((getattr(getattr(st, "workforce", None), "shift_allocation_by_role", {}) or {}).get("销售", 1.0))
+                    ),
+                    "客服": float(
+                        ((getattr(getattr(st, "workforce", None), "shift_allocation_by_role", {}) or {}).get("客服", 1.0))
+                    ),
+                },
+            },
+            "pending_hires": [
+                {
+                    "qty": int(getattr(p, "qty", 0) or 0),
+                    "order_day": int(getattr(p, "order_day", 0) or 0),
+                    "arrive_day": int(getattr(p, "arrive_day", 0) or 0),
+                }
+                for p in (getattr(st, "pending_hires", []) or [])
+            ],
             "inventory": [_inventory_to_dto(x) for x in st.inventory.values()],
             "assets": [_asset_to_dto(a, i) for i, a in enumerate(st.assets)],
             "services": [_service_to_dto(l) for l in st.service_lines.values()],
@@ -1021,12 +1122,132 @@ def create_app() -> FastAPI:
     # -------------------- JSON API (for the React frontend) --------------------
 
     def _state_to_dto(state: GameState) -> dict:
+        month_len = max(1, int(getattr(cfg, "month_len_days", 30) or 30))
+        month_start = ((int(state.day) - 1) // month_len) * month_len + 1
+        month_end = month_start + month_len - 1
+        rows = _read_ledger_rows()
+        mtd_revenue = 0.0
+        mtd_profit = 0.0
+        mtd_cashflow = 0.0
+        for r in rows:
+            try:
+                d = int(r.get("day") or 0)
+            except Exception:
+                continue
+            if d < month_start or d > min(int(state.day), month_end):
+                continue
+            try:
+                mtd_revenue += float(r.get("revenue") or 0.0)
+                mtd_profit += float(r.get("operating_profit") or 0.0)
+                mtd_cashflow += float(r.get("net_cashflow") or 0.0)
+            except Exception:
+                continue
+
+        alerts: list[dict] = []
+        cash = float(getattr(state, "cash", 0.0) or 0.0)
+        if cash < 0:
+            alerts.append({"level": "high", "code": "cash_negative", "message": f"总部现金为负：{cash:.2f}"})
+
+        credit_limit = max(0.0, float(getattr(state, "hq_credit_limit", 0.0) or 0.0))
+        credit_used = max(0.0, float(getattr(state, "hq_credit_used", 0.0) or 0.0))
+        if credit_limit > 0 and (credit_used / credit_limit) >= 0.8:
+            alerts.append(
+                {
+                    "level": "medium",
+                    "code": "credit_usage_high",
+                    "message": f"授信占用偏高：{(credit_used / credit_limit) * 100:.1f}%",
+                }
+            )
+
+        rev_target = max(0.0, float(getattr(state, "budget_monthly_revenue_target", 0.0) or 0.0))
+        pft_target = max(0.0, float(getattr(state, "budget_monthly_profit_target", 0.0) or 0.0))
+        cfs_target = max(0.0, float(getattr(state, "budget_monthly_cashflow_target", 0.0) or 0.0))
+        day_in_month = max(1, int(state.month_day_index(month_len)))
+        progress = min(1.0, day_in_month / float(month_len))
+        if rev_target > 0 and progress >= 0.5 and (mtd_revenue / rev_target) < progress * 0.75:
+            alerts.append(
+                {
+                    "level": "medium",
+                    "code": "budget_revenue_behind",
+                    "message": f"月度营收预算落后：{mtd_revenue:.0f}/{rev_target:.0f}",
+                }
+            )
+        if pft_target > 0 and progress >= 0.5 and (mtd_profit / pft_target) < progress * 0.75:
+            alerts.append(
+                {
+                    "level": "medium",
+                    "code": "budget_profit_behind",
+                    "message": f"月度利润预算落后：{mtd_profit:.0f}/{pft_target:.0f}",
+                }
+            )
+        if cfs_target > 0 and progress >= 0.5 and (mtd_cashflow / cfs_target) < progress * 0.75:
+            alerts.append(
+                {
+                    "level": "medium",
+                    "code": "budget_cashflow_behind",
+                    "message": f"月度现金流预算落后：{mtd_cashflow:.0f}/{cfs_target:.0f}",
+                }
+            )
+
+        for st in state.stores.values():
+            if str(getattr(st, "status", "")) != "open":
+                continue
+            wf = getattr(st, "workforce", None)
+            if wf is not None:
+                planned = max(1, int(getattr(wf, "planned_headcount", 1) or 1))
+                current = max(0, int(getattr(wf, "current_headcount", 0) or 0))
+                if current / planned < 0.6:
+                    alerts.append(
+                        {
+                            "level": "medium",
+                            "code": "workforce_shortage",
+                            "message": f"{st.store_id} 人手不足：{current}/{planned}",
+                        }
+                    )
+            if bool(getattr(st, "auto_replenishment_enabled", False)):
+                for sku, rule in (getattr(st, "replenishment_rules", {}) or {}).items():
+                    item = st.inventory.get(sku)
+                    qty = float(item.qty if item else 0.0)
+                    if qty < float(getattr(rule, "safety_stock", 0.0) or 0.0):
+                        alerts.append(
+                            {
+                                "level": "low",
+                                "code": "inventory_below_safety",
+                                "message": f"{st.store_id} {sku} 低于安全库存（{qty:.1f}）",
+                            }
+                        )
+
         return {
             "day": state.day,
             "cash": state.cash,
+            "finance": {
+                "hq_credit_limit": float(getattr(state, "hq_credit_limit", 0.0) or 0.0),
+                "hq_credit_used": float(getattr(state, "hq_credit_used", 0.0) or 0.0),
+                "hq_daily_interest_rate": float(getattr(state, "hq_daily_interest_rate", 0.0005) or 0.0),
+                "hq_auto_finance": bool(getattr(state, "hq_auto_finance", False)),
+                "budget_monthly_revenue_target": float(
+                    getattr(state, "budget_monthly_revenue_target", 0.0) or 0.0
+                ),
+                "budget_monthly_profit_target": float(
+                    getattr(state, "budget_monthly_profit_target", 0.0) or 0.0
+                ),
+                "budget_monthly_cashflow_target": float(
+                    getattr(state, "budget_monthly_cashflow_target", 0.0) or 0.0
+                ),
+                "budget_mtd": {
+                    "month_start_day": int(month_start),
+                    "month_end_day": int(month_end),
+                    "day_in_month": int(day_in_month),
+                    "progress": float(round(progress, 6)),
+                    "revenue": float(round(mtd_revenue, 4)),
+                    "profit": float(round(mtd_profit, 4)),
+                    "cashflow": float(round(mtd_cashflow, 4)),
+                },
+            },
             "stations": [_station_to_dto(s) for s in state.stations.values()],
             "stores": [_store_to_dto(s) for s in state.stores.values()],
             "ledger": _read_ledger_entries(limit=200),
+            "insights": {"alerts": alerts[:300]},
             "events": {
                 "rng_seed": int(getattr(state, "rng_seed", 0) or 0),
                 "templates": [_event_template_to_dto(t) for t in getattr(state, "event_templates", {}).values()],
@@ -1052,6 +1273,38 @@ def create_app() -> FastAPI:
                 "active": [_active_event_to_dto(e) for e in getattr(state, "active_events", [])],
                 "history": [_event_history_to_dto(h) for h in getattr(state, "event_history", [])][-500:],
             }
+
+    @app.put("/api/finance")
+    def api_finance_update(payload: dict = Body(default={})):
+        with _lock:
+            state = _ensure_state()
+            if "hq_credit_limit" in payload:
+                state.hq_credit_limit = max(0.0, float(payload.get("hq_credit_limit") or 0.0))
+            if "hq_daily_interest_rate" in payload:
+                state.hq_daily_interest_rate = max(0.0, float(payload.get("hq_daily_interest_rate") or 0.0))
+            if "hq_auto_finance" in payload:
+                state.hq_auto_finance = bool(payload.get("hq_auto_finance"))
+            if "budget_monthly_revenue_target" in payload:
+                state.budget_monthly_revenue_target = max(
+                    0.0, float(payload.get("budget_monthly_revenue_target") or 0.0)
+                )
+            if "budget_monthly_profit_target" in payload:
+                state.budget_monthly_profit_target = max(
+                    0.0, float(payload.get("budget_monthly_profit_target") or 0.0)
+                )
+            if "budget_monthly_cashflow_target" in payload:
+                state.budget_monthly_cashflow_target = max(
+                    0.0, float(payload.get("budget_monthly_cashflow_target") or 0.0)
+                )
+            # Optional manual repay
+            if "manual_repay" in payload:
+                repay = max(0.0, float(payload.get("manual_repay") or 0.0))
+                actual = min(repay, float(state.cash), float(getattr(state, "hq_credit_used", 0.0) or 0.0))
+                if actual > 0:
+                    state.cash -= actual
+                    state.hq_credit_used = max(0.0, float(state.hq_credit_used) - actual)
+            save_state(state)
+        return api_state()
 
     @app.get("/api/site-recommendations")
     def api_site_recommendations(
@@ -1397,6 +1650,75 @@ def create_app() -> FastAPI:
                 st.attractiveness_index = max(0.5, min(1.5, float(payload.get("attractiveness_index") or 1.0)))
             if "auto_replenishment_enabled" in payload:
                 st.auto_replenishment_enabled = bool(payload.get("auto_replenishment_enabled"))
+
+            w = payload.get("workforce")
+            if isinstance(w, dict):
+                wf = getattr(st, "workforce", None)
+                if wf is not None:
+                    if "planned_headcount" in w:
+                        wf.planned_headcount = max(0, int(w.get("planned_headcount") or 0))
+                    if "current_headcount" in w:
+                        wf.current_headcount = max(0, int(w.get("current_headcount") or 0))
+                    if "training_level" in w:
+                        wf.training_level = max(0.0, min(1.0, float(w.get("training_level") or 0.0)))
+                    if "daily_turnover_rate" in w:
+                        wf.daily_turnover_rate = max(0.0, min(1.0, float(w.get("daily_turnover_rate") or 0.0)))
+                    if "recruiting_enabled" in w:
+                        wf.recruiting_enabled = bool(w.get("recruiting_enabled"))
+                    if "recruiting_daily_budget" in w:
+                        wf.recruiting_daily_budget = max(0.0, float(w.get("recruiting_daily_budget") or 0.0))
+                    if "recruiting_lead_days" in w:
+                        wf.recruiting_lead_days = max(0, int(w.get("recruiting_lead_days") or 0))
+                    if "recruiting_hire_rate_per_100_budget" in w:
+                        wf.recruiting_hire_rate_per_100_budget = max(
+                            0.0, float(w.get("recruiting_hire_rate_per_100_budget") or 0.0)
+                        )
+                    if "shifts_per_day" in w:
+                        wf.shifts_per_day = max(1, int(w.get("shifts_per_day") or 1))
+                    if "staffing_per_shift" in w:
+                        wf.staffing_per_shift = max(1, int(w.get("staffing_per_shift") or 1))
+                    if "shift_hours" in w:
+                        wf.shift_hours = max(1.0, float(w.get("shift_hours") or 1.0))
+                    if "overtime_shift_enabled" in w:
+                        wf.overtime_shift_enabled = bool(w.get("overtime_shift_enabled"))
+                    if "overtime_shift_extra_capacity" in w:
+                        wf.overtime_shift_extra_capacity = max(
+                            0.0, float(w.get("overtime_shift_extra_capacity") or 0.0)
+                        )
+                    if "overtime_shift_daily_cost" in w:
+                        wf.overtime_shift_daily_cost = max(0.0, float(w.get("overtime_shift_daily_cost") or 0.0))
+                    if "skill_by_category" in w and isinstance(w.get("skill_by_category"), dict):
+                        d = w.get("skill_by_category") or {}
+                        wf.skill_by_category = {
+                            "wash": max(0.0, float(d.get("wash", 1.0) or 0.0)),
+                            "maintenance": max(0.0, float(d.get("maintenance", 1.0) or 0.0)),
+                            "detailing": max(0.0, float(d.get("detailing", 1.0) or 0.0)),
+                            "other": max(0.0, float(d.get("other", 1.0) or 0.0)),
+                        }
+                    if "shift_allocation_by_category" in w and isinstance(w.get("shift_allocation_by_category"), dict):
+                        d = w.get("shift_allocation_by_category") or {}
+                        wf.shift_allocation_by_category = {
+                            "wash": max(0.0, float(d.get("wash", 1.0) or 0.0)),
+                            "maintenance": max(0.0, float(d.get("maintenance", 1.0) or 0.0)),
+                            "detailing": max(0.0, float(d.get("detailing", 1.0) or 0.0)),
+                            "other": max(0.0, float(d.get("other", 1.0) or 0.0)),
+                        }
+                    if "skill_by_role" in w and isinstance(w.get("skill_by_role"), dict):
+                        d = w.get("skill_by_role") or {}
+                        wf.skill_by_role = {
+                            "技师": max(0.0, float(d.get("技师", 1.0) or 0.0)),
+                            "店长": max(0.0, float(d.get("店长", 1.0) or 0.0)),
+                            "销售": max(0.0, float(d.get("销售", 1.0) or 0.0)),
+                            "客服": max(0.0, float(d.get("客服", 1.0) or 0.0)),
+                        }
+                    if "shift_allocation_by_role" in w and isinstance(w.get("shift_allocation_by_role"), dict):
+                        d = w.get("shift_allocation_by_role") or {}
+                        wf.shift_allocation_by_role = {
+                            "技师": max(0.0, float(d.get("技师", 1.0) or 0.0)),
+                            "店长": max(0.0, float(d.get("店长", 1.0) or 0.0)),
+                            "销售": max(0.0, float(d.get("销售", 1.0) or 0.0)),
+                            "客服": max(0.0, float(d.get("客服", 1.0) or 0.0)),
+                        }
 
             # mitigation (nested patch)
             m = payload.get("mitigation")

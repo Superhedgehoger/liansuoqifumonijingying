@@ -71,6 +71,7 @@ python tools\test_events.py
   - A/B 场景对比（`/api/scenarios/compare`，内存并行仿真，不写真实存档）
   - 事件对冲动作：应急供电/临促补偿/加班扩容（门店 `mitigation`）
   - 自动补货：安全库存 + 触发点 + 目标库存 + 采购提前期（replenishment rules）
+  - P3 启动：人力生命周期（流失/招聘/培训）+ 总部融资（授信/利率/自动融资）+ 风险预警
 
 补充（P2-1 进展）：
 

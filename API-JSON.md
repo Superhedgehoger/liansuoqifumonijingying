@@ -14,6 +14,7 @@ Base URL（本机默认）：`http://127.0.0.1:8000`
 
 - 返回：`SimulationState`
 - 说明：包含 `stations[]`、`stores[]`、`ledger[]`（最近 200 条），以及 `events`（事件系统）
+- 补充（P3）：包含 `finance`（总部融资状态）与 `insights.alerts`（预警）
 
 `events` 结构：
 
@@ -106,6 +107,37 @@ Base URL（本机默认）：`http://127.0.0.1:8000`
 
 - 返回：`baseline` 与 `scenarios[]` 指标及 `delta_vs_baseline`
 - 说明：只在内存并行仿真，不改写真实 `state.json` 与 `ledger.csv`
+
+### PUT `/api/finance`
+
+- Body（可部分字段）：
+```json
+{
+  "hq_credit_limit": 500000,
+  "hq_daily_interest_rate": 0.0006,
+  "hq_auto_finance": true,
+  "budget_monthly_revenue_target": 2000000,
+  "budget_monthly_profit_target": 300000,
+  "budget_monthly_cashflow_target": 250000,
+  "manual_repay": 10000
+}
+```
+- 返回：全量 `SimulationState`
+- 说明：`finance.budget_mtd` 会返回当月进度与 MTD 实际值
+
+### PUT `/api/stores/{store_id}`（workforce 扩展）
+
+- `workforce` 额外字段（P3-next）：
+  - `shifts_per_day`
+  - `staffing_per_shift`
+  - `shift_hours`
+  - `overtime_shift_enabled`
+  - `overtime_shift_extra_capacity`
+  - `overtime_shift_daily_cost`
+  - `skill_by_category`（wash/maintenance/detailing/other）
+  - `shift_allocation_by_category`（wash/maintenance/detailing/other）
+  - `skill_by_role`（技师/店长/销售/客服）
+  - `shift_allocation_by_role`（技师/店长/销售/客服）
 
 ## 2) 模拟/回退/重置
 

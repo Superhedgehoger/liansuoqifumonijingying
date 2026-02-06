@@ -17,6 +17,7 @@ from simgame.models import (
     InsuranceBizConfig,
     MitigationConfig,
     OpexConfig,
+    PendingHire,
     PayrollPlan,
     OnlineBizConfig,
     RentConfig,
@@ -28,6 +29,7 @@ from simgame.models import (
     SupplyChainConfig,
     ReplenishmentRule,
     PendingInbound,
+    WorkforceConfig,
     UtilitiesConfig,
     UsedCarBizConfig,
 )
@@ -416,6 +418,13 @@ def load_state(path: Path | None = None) -> GameState:
     state.active_events = _load_active_events(d.get("active_events"))
     state.event_history = _load_event_history(d.get("event_history"))
     state.event_cooldowns = {str(k): int(v) for k, v in (d.get("event_cooldowns") or {}).items()}
+    state.hq_credit_limit = max(0.0, float(d.get("hq_credit_limit", 0.0) or 0.0))
+    state.hq_credit_used = max(0.0, float(d.get("hq_credit_used", 0.0) or 0.0))
+    state.hq_daily_interest_rate = max(0.0, float(d.get("hq_daily_interest_rate", 0.0005) or 0.0))
+    state.hq_auto_finance = bool(d.get("hq_auto_finance", False))
+    state.budget_monthly_revenue_target = max(0.0, float(d.get("budget_monthly_revenue_target", 0.0) or 0.0))
+    state.budget_monthly_profit_target = max(0.0, float(d.get("budget_monthly_profit_target", 0.0) or 0.0))
+    state.budget_monthly_cashflow_target = max(0.0, float(d.get("budget_monthly_cashflow_target", 0.0) or 0.0))
     _seed_default_event_templates(state)
 
     # Stations
@@ -488,6 +497,62 @@ def load_state(path: Path | None = None) -> GameState:
                         name=str(p.get("name", "") or ""),
                         qty=max(0.0, float(p.get("qty", 0.0) or 0.0)),
                         unit_cost=max(0.0, float(p.get("unit_cost", 0.0) or 0.0)),
+                        order_day=int(p.get("order_day", 0) or 0),
+                        arrive_day=int(p.get("arrive_day", 0) or 0),
+                    )
+                )
+        wf_raw = st_d.get("workforce") if isinstance(st_d.get("workforce"), dict) else {}
+        store.workforce = WorkforceConfig(
+            planned_headcount=max(0, int(wf_raw.get("planned_headcount", 6) or 0)),
+            current_headcount=max(0, int(wf_raw.get("current_headcount", 6) or 0)),
+            training_level=max(0.0, min(1.0, float(wf_raw.get("training_level", 0.5) or 0.0))),
+            daily_turnover_rate=max(0.0, min(1.0, float(wf_raw.get("daily_turnover_rate", 0.002) or 0.0))),
+            recruiting_enabled=bool(wf_raw.get("recruiting_enabled", False)),
+            recruiting_daily_budget=max(0.0, float(wf_raw.get("recruiting_daily_budget", 0.0) or 0.0)),
+            recruiting_lead_days=max(0, int(wf_raw.get("recruiting_lead_days", 7) or 0)),
+            recruiting_hire_rate_per_100_budget=max(
+                0.0, float(wf_raw.get("recruiting_hire_rate_per_100_budget", 0.20) or 0.0)
+            ),
+            shifts_per_day=max(1, int(wf_raw.get("shifts_per_day", 2) or 1)),
+            staffing_per_shift=max(1, int(wf_raw.get("staffing_per_shift", 3) or 1)),
+            shift_hours=max(1.0, float(wf_raw.get("shift_hours", 8.0) or 1.0)),
+            overtime_shift_enabled=bool(wf_raw.get("overtime_shift_enabled", False)),
+            overtime_shift_extra_capacity=max(0.0, float(wf_raw.get("overtime_shift_extra_capacity", 0.15) or 0.0)),
+            overtime_shift_daily_cost=max(0.0, float(wf_raw.get("overtime_shift_daily_cost", 0.0) or 0.0)),
+            skill_by_category={
+                "wash": max(0.0, float(((wf_raw.get("skill_by_category") or {}).get("wash", 1.0)) or 0.0)),
+                "maintenance": max(0.0, float(((wf_raw.get("skill_by_category") or {}).get("maintenance", 1.0)) or 0.0)),
+                "detailing": max(0.0, float(((wf_raw.get("skill_by_category") or {}).get("detailing", 1.0)) or 0.0)),
+                "other": max(0.0, float(((wf_raw.get("skill_by_category") or {}).get("other", 1.0)) or 0.0)),
+            },
+            shift_allocation_by_category={
+                "wash": max(0.0, float(((wf_raw.get("shift_allocation_by_category") or {}).get("wash", 1.0)) or 0.0)),
+                "maintenance": max(0.0, float(((wf_raw.get("shift_allocation_by_category") or {}).get("maintenance", 1.0)) or 0.0)),
+                "detailing": max(0.0, float(((wf_raw.get("shift_allocation_by_category") or {}).get("detailing", 1.0)) or 0.0)),
+                "other": max(0.0, float(((wf_raw.get("shift_allocation_by_category") or {}).get("other", 1.0)) or 0.0)),
+            },
+            skill_by_role={
+                "技师": max(0.0, float(((wf_raw.get("skill_by_role") or {}).get("技师", 1.0)) or 0.0)),
+                "店长": max(0.0, float(((wf_raw.get("skill_by_role") or {}).get("店长", 1.0)) or 0.0)),
+                "销售": max(0.0, float(((wf_raw.get("skill_by_role") or {}).get("销售", 1.0)) or 0.0)),
+                "客服": max(0.0, float(((wf_raw.get("skill_by_role") or {}).get("客服", 1.0)) or 0.0)),
+            },
+            shift_allocation_by_role={
+                "技师": max(0.0, float(((wf_raw.get("shift_allocation_by_role") or {}).get("技师", 1.0)) or 0.0)),
+                "店长": max(0.0, float(((wf_raw.get("shift_allocation_by_role") or {}).get("店长", 1.0)) or 0.0)),
+                "销售": max(0.0, float(((wf_raw.get("shift_allocation_by_role") or {}).get("销售", 1.0)) or 0.0)),
+                "客服": max(0.0, float(((wf_raw.get("shift_allocation_by_role") or {}).get("客服", 1.0)) or 0.0)),
+            },
+        )
+        store.pending_hires = []
+        ph_raw = st_d.get("pending_hires") or []
+        if isinstance(ph_raw, list):
+            for p in ph_raw:
+                if not isinstance(p, dict):
+                    continue
+                store.pending_hires.append(
+                    PendingHire(
+                        qty=max(0, int(p.get("qty", 0) or 0)),
                         order_day=int(p.get("order_day", 0) or 0),
                         arrive_day=int(p.get("arrive_day", 0) or 0),
                     )
@@ -643,6 +708,15 @@ def append_ledger_csv(day_result: Any) -> None:
         "replenishment_cost",
         "replenishment_orders_json",
         "inbound_arrivals_json",
+        "workforce_lost",
+        "workforce_hired",
+        "workforce_recruit_cost",
+        "workforce_headcount_start",
+        "workforce_headcount_end",
+        "workforce_capacity_factor",
+        "shift_coverage_ratio",
+        "shift_overtime_cost",
+        "workforce_breakdown_json",
         "revenue",
         "variable_cost",
         "parts_cogs",
@@ -721,6 +795,15 @@ def append_ledger_csv(day_result: Any) -> None:
                     getattr(sr, "replenishment_cost", 0.0),
                     getattr(sr, "replenishment_orders_json", "[]"),
                     getattr(sr, "inbound_arrivals_json", "[]"),
+                    getattr(sr, "workforce_lost", 0),
+                    getattr(sr, "workforce_hired", 0),
+                    getattr(sr, "workforce_recruit_cost", 0.0),
+                    getattr(sr, "workforce_headcount_start", 0),
+                    getattr(sr, "workforce_headcount_end", 0),
+                    getattr(sr, "workforce_capacity_factor", 1.0),
+                    getattr(sr, "shift_coverage_ratio", 1.0),
+                    getattr(sr, "shift_overtime_cost", 0.0),
+                    getattr(sr, "workforce_breakdown_json", "{}"),
                     sr.revenue,
                     sr.variable_cost,
                     sr.parts_cogs,
