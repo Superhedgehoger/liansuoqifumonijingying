@@ -1,5 +1,17 @@
 # 更新日志
 
+## 0.7.5
+
+- 模拟体验升级：新增异步模拟任务接口（`/api/simulate/async`、`/api/simulate/jobs/{job_id}`、`/api/simulate/jobs/{job_id}/cancel`），支持进度查询与取消
+- 前端顶部模拟控件改为任务化执行：新增“正在模拟中”浮层、百分比进度与取消按钮，长时模拟可视化
+- 修复导入流程：导入文案统一为“导入数据”，修复刷新后再次导入卡在“导入中...”的问题
+- 修复“重置模拟”按钮无效：改为直接调用 `apiReset` 并刷新前端状态，增加成功/失败反馈
+- P3-Next（排班/请假）：新增班次级请假参数（早晚班计划请假率、早晚班病假率），接入人力产能计算与审计字段
+- P3-Next（预算/融资）：新增 `capex_cash_payment_ratio`（CAPEX 现金支付比例）、`rolling_budget_window_days`（滚动预算窗口）
+- P3-Next（融资成本归集）：支持 `finance_cost_allocation_method=revenue|credit_usage` 两种分摊方式，并跟踪门店融资占用
+- P3-Next（BI深化）：新增 `insights.productivity`（区域/业态/角色人效钻取 + 日趋势），前端新增筛选器与趋势窗口切换（7/14/30/60/90 天）
+- 账本增强：新增请假与融资归集字段（如 `workforce_leave_planned`、`workforce_leave_sick`、`finance_interest_allocated`、`finance_capex_financed`）
+
 ## 0.7.4
 
 - 完成 P2 收口并启动 P3：

@@ -21,6 +21,39 @@ export function apiSimulate(days: number): Promise<SimulationState> {
   });
 }
 
+export type SimulateJobStatus = {
+  job_id: string;
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled' | string;
+  days: number;
+  completed_days: number;
+  progress: number;
+  message: string;
+  error: string;
+  cancel_requested: boolean;
+  created_at: string;
+  started_at: string;
+  finished_at: string;
+  code?: string;
+};
+
+export function apiStartSimulateAsync(days: number): Promise<SimulateJobStatus> {
+  return requestJson<SimulateJobStatus>('/api/simulate/async', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ days })
+  });
+}
+
+export function apiGetSimulateJobStatus(jobId: string): Promise<SimulateJobStatus> {
+  return requestJson<SimulateJobStatus>(`/api/simulate/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function apiCancelSimulateJob(jobId: string): Promise<SimulateJobStatus> {
+  return requestJson<SimulateJobStatus>(`/api/simulate/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST'
+  });
+}
+
 export function apiRollback(days: number): Promise<SimulationState> {
   return requestJson<SimulationState>('/api/rollback', {
     method: 'POST',
@@ -134,11 +167,14 @@ export function apiDeleteReplenishmentRule(store_id: string, sku: string): Promi
 async function uploadFile(url: string, file: File): Promise<void> {
   const fd = new FormData();
   fd.append('file', file);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
   const res = await fetch(url, {
     method: 'POST',
     body: fd,
-    credentials: 'same-origin'
-  });
+    credentials: 'same-origin',
+    signal: ctrl.signal,
+  }).finally(() => clearTimeout(timer));
   if (!res.ok) {
     const text = await res.text().catch(() => '上传失败');
     throw new Error(text || `HTTP ${res.status}`);

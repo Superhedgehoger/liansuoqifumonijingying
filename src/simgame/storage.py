@@ -427,6 +427,9 @@ def load_state(path: Path | None = None) -> GameState:
     state.budget_monthly_revenue_target = max(0.0, float(d.get("budget_monthly_revenue_target", 0.0) or 0.0))
     state.budget_monthly_profit_target = max(0.0, float(d.get("budget_monthly_profit_target", 0.0) or 0.0))
     state.budget_monthly_cashflow_target = max(0.0, float(d.get("budget_monthly_cashflow_target", 0.0) or 0.0))
+    state.capex_cash_payment_ratio = max(0.0, min(1.0, float(d.get("capex_cash_payment_ratio", 1.0) or 0.0)))
+    state.rolling_budget_window_days = max(7, min(180, int(d.get("rolling_budget_window_days", 30) or 30)))
+    state.finance_cost_allocation_method = str(d.get("finance_cost_allocation_method", "revenue") or "revenue")
     state.store_bulk_templates = []
     for t in (d.get("store_bulk_templates") or []):
         if not isinstance(t, dict):
@@ -544,6 +547,12 @@ def load_state(path: Path | None = None) -> GameState:
             recruiting_hire_rate_per_100_budget=max(
                 0.0, float(wf_raw.get("recruiting_hire_rate_per_100_budget", 0.20) or 0.0)
             ),
+            planned_leave_rate=max(0.0, min(1.0, float(wf_raw.get("planned_leave_rate", 0.0) or 0.0))),
+            unplanned_absence_rate=max(0.0, min(1.0, float(wf_raw.get("unplanned_absence_rate", 0.0) or 0.0))),
+            planned_leave_rate_day=max(0.0, min(1.0, float(wf_raw.get("planned_leave_rate_day", 0.0) or 0.0))),
+            planned_leave_rate_night=max(0.0, min(1.0, float(wf_raw.get("planned_leave_rate_night", 0.0) or 0.0))),
+            sick_leave_rate_day=max(0.0, min(1.0, float(wf_raw.get("sick_leave_rate_day", 0.0) or 0.0))),
+            sick_leave_rate_night=max(0.0, min(1.0, float(wf_raw.get("sick_leave_rate_night", 0.0) or 0.0))),
             shifts_per_day=max(1, int(wf_raw.get("shifts_per_day", 2) or 1)),
             staffing_per_shift=max(1, int(wf_raw.get("staffing_per_shift", 3) or 1)),
             shift_hours=max(1.0, float(wf_raw.get("shift_hours", 8.0) or 1.0)),
@@ -605,6 +614,7 @@ def load_state(path: Path | None = None) -> GameState:
         store.fixed_overhead_per_day = float(st_d.get("fixed_overhead_per_day", 0.0))
         store.strict_parts = bool(st_d.get("strict_parts", True))
         store.cash_balance = float(st_d.get("cash_balance", 0.0))
+        store.finance_credit_used = max(0.0, float(st_d.get("finance_credit_used", 0.0) or 0.0))
 
         # Service lines
         for sid, ld in (st_d.get("service_lines") or {}).items():
@@ -747,7 +757,13 @@ def append_ledger_csv(day_result: Any) -> None:
         "workforce_capacity_factor",
         "shift_coverage_ratio",
         "shift_overtime_cost",
+        "workforce_leave_absent",
+        "workforce_leave_planned",
+        "workforce_leave_sick",
+        "workforce_leave_cost",
         "workforce_breakdown_json",
+        "finance_interest_allocated",
+        "finance_capex_financed",
         "revenue",
         "variable_cost",
         "parts_cogs",
@@ -834,7 +850,13 @@ def append_ledger_csv(day_result: Any) -> None:
                     getattr(sr, "workforce_capacity_factor", 1.0),
                     getattr(sr, "shift_coverage_ratio", 1.0),
                     getattr(sr, "shift_overtime_cost", 0.0),
+                    getattr(sr, "workforce_leave_absent", 0),
+                    getattr(sr, "workforce_leave_planned", 0),
+                    getattr(sr, "workforce_leave_sick", 0),
+                    getattr(sr, "workforce_leave_cost", 0.0),
                     getattr(sr, "workforce_breakdown_json", "{}"),
+                    getattr(sr, "finance_interest_allocated", 0.0),
+                    getattr(sr, "finance_capex_financed", 0.0),
                     sr.revenue,
                     sr.variable_cost,
                     sr.parts_cogs,

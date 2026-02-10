@@ -260,6 +260,12 @@ class WorkforceConfig:
     recruiting_daily_budget: float = 0.0
     recruiting_lead_days: int = 7
     recruiting_hire_rate_per_100_budget: float = 0.20
+    planned_leave_rate: float = 0.0
+    unplanned_absence_rate: float = 0.0
+    planned_leave_rate_day: float = 0.0
+    planned_leave_rate_night: float = 0.0
+    sick_leave_rate_day: float = 0.0
+    sick_leave_rate_night: float = 0.0
 
     # P3-next: shift scheduling
     shifts_per_day: int = 2
@@ -379,6 +385,7 @@ class Store:
     capex_useful_life_days: int = 5 * 365
 
     cash_balance: float = 0.0
+    finance_credit_used: float = 0.0
 
     fixed_overhead_per_day: float = 0.0
     service_lines: Dict[str, ServiceLine] = field(default_factory=dict)
@@ -493,7 +500,13 @@ class DayStoreResult:
     workforce_capacity_factor: float = 1.0
     shift_coverage_ratio: float = 1.0
     shift_overtime_cost: float = 0.0
+    workforce_leave_absent: int = 0
+    workforce_leave_planned: int = 0
+    workforce_leave_sick: int = 0
+    workforce_leave_cost: float = 0.0
     workforce_breakdown_json: str = "{}"
+    finance_interest_allocated: float = 0.0
+    finance_capex_financed: float = 0.0
     revenue: float = 0.0
     variable_cost: float = 0.0
     parts_cogs: float = 0.0
@@ -564,6 +577,9 @@ class GameState:
     budget_monthly_revenue_target: float = 0.0
     budget_monthly_profit_target: float = 0.0
     budget_monthly_cashflow_target: float = 0.0
+    capex_cash_payment_ratio: float = 1.0
+    rolling_budget_window_days: int = 30
+    finance_cost_allocation_method: str = "revenue"  # revenue|credit_usage
 
     # Shared UI templates
     store_bulk_templates: List[StoreBulkTemplate] = field(default_factory=list)

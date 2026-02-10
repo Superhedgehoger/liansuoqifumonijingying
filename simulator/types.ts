@@ -66,6 +66,12 @@ export interface Store {
     recruiting_daily_budget?: number;
     recruiting_lead_days?: number;
     recruiting_hire_rate_per_100_budget?: number;
+    planned_leave_rate?: number;
+    unplanned_absence_rate?: number;
+    planned_leave_rate_day?: number;
+    planned_leave_rate_night?: number;
+    sick_leave_rate_day?: number;
+    sick_leave_rate_night?: number;
     shifts_per_day?: number;
     staffing_per_shift?: number;
     shift_hours?: number;
@@ -102,6 +108,7 @@ export interface Store {
     order_day: number;
     arrive_day: number;
   }>;
+  finance_credit_used?: number;
   labor_hour_price?: number;
   capex_total: number;
   capex_useful_life_days: number;
@@ -221,6 +228,9 @@ export interface SimulationState {
     budget_monthly_revenue_target?: number;
     budget_monthly_profit_target?: number;
     budget_monthly_cashflow_target?: number;
+    capex_cash_payment_ratio?: number;
+    rolling_budget_window_days?: number;
+    finance_cost_allocation_method?: 'revenue' | 'credit_usage' | string;
     budget_mtd?: {
       month_start_day: number;
       month_end_day: number;
@@ -229,10 +239,32 @@ export interface SimulationState {
       revenue: number;
       profit: number;
       cashflow: number;
+      finance_interest?: number;
+      financed_capex?: number;
+    };
+    rolling_budget?: {
+      window_days: number;
+      start_day: number;
+      end_day: number;
+      revenue: number;
+      profit: number;
+      cashflow: number;
+      orders: number;
+      avg_daily_revenue: number;
+      avg_daily_profit: number;
+      avg_daily_cashflow: number;
+      avg_revenue_per_headcount: number;
+      revenue_momentum_vs_prev_window: number;
     };
   };
   insights?: {
     alerts: Array<{ level: string; code: string; message: string }>;
+    productivity?: {
+      by_region?: Array<{ region: string; revenue: number; orders: number; headcount: number; revenue_per_headcount: number }>;
+      by_category?: Array<{ category: string; revenue: number; headcount: number; revenue_per_headcount: number }>;
+      by_role?: Array<{ role: string; revenue: number; headcount: number; revenue_per_headcount: number }>;
+      trend_daily?: Array<{ day: number; revenue: number; profit: number; cashflow: number; orders: number; revenue_per_headcount: number }>;
+    };
   };
   bulk_templates?: {
     store_ops: Array<{ name: string; status: 'planning' | 'constructing' | 'open' | 'closed'; inv: number; asset: number }>;

@@ -1004,10 +1004,10 @@ def _sample_turnover(headcount: int, rate: float, rng: random.Random) -> int:
     return out
 
 
-def _workforce_daily(store: Store, day: int, rng: random.Random) -> tuple[int, int, float, float, float, float]:
+def _workforce_daily(store: Store, day: int, rng: random.Random) -> tuple[int, int, float, float, float, float, int, int, int, float]:
     wf = getattr(store, "workforce", None)
     if wf is None:
-        return 0, 0, 0.0, 1.0, 1.0, 0.0
+        return 0, 0, 0.0, 1.0, 1.0, 0.0, 0, 0, 0, 0.0
 
     current = max(0, int(getattr(wf, "current_headcount", 0) or 0))
     planned = max(1, int(getattr(wf, "planned_headcount", current if current > 0 else 1) or 1))
@@ -1034,15 +1034,38 @@ def _workforce_daily(store: Store, day: int, rng: random.Random) -> tuple[int, i
 
     wf.current_headcount = current
 
+    # Leave/absence (P3-next shift-level)
+    p_day = max(0.0, min(1.0, float(getattr(wf, "planned_leave_rate_day", 0.0) or 0.0)))
+    p_night = max(0.0, min(1.0, float(getattr(wf, "planned_leave_rate_night", 0.0) or 0.0)))
+    s_day = max(0.0, min(1.0, float(getattr(wf, "sick_leave_rate_day", 0.0) or 0.0)))
+    s_night = max(0.0, min(1.0, float(getattr(wf, "sick_leave_rate_night", 0.0) or 0.0)))
+    if (p_day + p_night + s_day + s_night) <= 0:
+        p_day = max(0.0, min(1.0, float(getattr(wf, "planned_leave_rate", 0.0) or 0.0)))
+        p_night = p_day
+        s_day = max(0.0, min(1.0, float(getattr(wf, "unplanned_absence_rate", 0.0) or 0.0)))
+        s_night = s_day
+
+    shifts = max(1, int(getattr(wf, "shifts_per_day", 2) or 1))
+    if shifts <= 1:
+        planned_rate = p_day
+        sick_rate = s_day
+    else:
+        planned_rate = (p_day + p_night) / 2.0
+        sick_rate = (s_day + s_night) / 2.0
+    planned_absent = _sample_turnover(current, planned_rate, rng)
+    sick_absent = _sample_turnover(max(0, current - planned_absent), sick_rate, rng)
+    leave_absent = planned_absent + sick_absent
+    available = max(0, current - leave_absent)
+
     # Capacity factor from staffing gap and training.
-    staffing_ratio = float(current) / float(planned)
+    staffing_ratio = float(available) / float(planned)
     base_factor = max(0.4, min(1.3, staffing_ratio * (0.8 + 0.4 * training)))
 
     # Shift coverage factor (P3-next)
     shifts = max(1, int(getattr(wf, "shifts_per_day", 2) or 1))
     staffing = max(1, int(getattr(wf, "staffing_per_shift", 3) or 1))
     required = float(shifts * staffing)
-    coverage = min(1.2, float(current) / required)
+    coverage = min(1.2, float(available) / required)
     overtime_cost = 0.0
     if coverage < 1.0 and bool(getattr(wf, "overtime_shift_enabled", False)):
         extra = max(0.0, float(getattr(wf, "overtime_shift_extra_capacity", 0.15) or 0.0))
@@ -1050,7 +1073,18 @@ def _workforce_daily(store: Store, day: int, rng: random.Random) -> tuple[int, i
         overtime_cost = max(0.0, float(getattr(wf, "overtime_shift_daily_cost", 0.0) or 0.0))
 
     factor = max(0.3, min(1.4, base_factor * max(0.3, coverage)))
-    return lost, hired, recruit_cost, factor, coverage, overtime_cost
+    return (
+        lost,
+        hired,
+        recruit_cost,
+        factor,
+        coverage,
+        overtime_cost,
+        int(leave_absent),
+        int(planned_absent),
+        int(sick_absent),
+        0.0,
+    )
 
 
 def _workforce_category_capacity_factors(store: Store) -> Dict[str, float]:
@@ -1107,6 +1141,60 @@ def _apply_hq_finance(state: GameState, day_result: DayResult) -> None:
                 state.cash -= repay
                 state.hq_credit_used = used - repay
                 day_result.finance_credit_repay = float(repay)
+                store_used = {sid: max(0.0, float(getattr(st, "finance_credit_used", 0.0) or 0.0)) for sid, st in state.stores.items()}
+                total_store_used = sum(store_used.values())
+                if total_store_used > 0:
+                    left = float(repay)
+                    keys = list(store_used.keys())
+                    for idx, sid in enumerate(keys):
+                        st = state.stores[sid]
+                        used_i = store_used[sid]
+                        if used_i <= 0:
+                            continue
+                        if idx == len(keys) - 1:
+                            deduct = min(left, float(getattr(st, "finance_credit_used", 0.0) or 0.0))
+                        else:
+                            deduct = min(
+                                left,
+                                float(getattr(st, "finance_credit_used", 0.0) or 0.0),
+                                repay * (used_i / total_store_used),
+                            )
+                        if deduct > 0:
+                            st.finance_credit_used = max(0.0, float(st.finance_credit_used) - deduct)
+                            left -= deduct
+
+
+def _allocate_finance_cost_to_stores(state: GameState, day_result: DayResult) -> None:
+    interest = max(0.0, float(getattr(day_result, "finance_interest_cost", 0.0) or 0.0))
+    if interest <= 0:
+        return
+    rows = list(getattr(day_result, "store_results", []) or [])
+    if not rows:
+        return
+    method = str(getattr(state, "finance_cost_allocation_method", "revenue") or "revenue").strip().lower()
+    if method == "credit_usage":
+        total_credit = 0.0
+        credit_weights = {}
+        for sr in rows:
+            st = state.stores.get(str(getattr(sr, "store_id", "") or ""))
+            w = max(0.0, float(getattr(st, "finance_credit_used", 0.0) or 0.0)) if st is not None else 0.0
+            credit_weights[sr.store_id] = w
+            total_credit += w
+        if total_credit > 0:
+            for sr in rows:
+                w = credit_weights.get(sr.store_id, 0.0) / total_credit
+                sr.finance_interest_allocated = float(interest * w)
+            return
+
+    total_revenue = sum(max(0.0, float(getattr(sr, "revenue", 0.0) or 0.0)) for sr in rows)
+    if total_revenue <= 0:
+        per = interest / float(len(rows))
+        for sr in rows:
+            sr.finance_interest_allocated = float(per)
+        return
+    for sr in rows:
+        w = max(0.0, float(getattr(sr, "revenue", 0.0) or 0.0)) / total_revenue
+        sr.finance_interest_allocated = float(interest * w)
 
 
 def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
@@ -1135,10 +1223,26 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
         if store.status == "constructing":
             spend = max(0.0, float(store.capex_spend_per_day))
             if spend > 0:
-                actual = min(state.cash, spend)
-                state.cash -= actual
-                sr.cash_out += actual
-                store.cash_balance -= actual
+                ratio = max(0.0, min(1.0, float(getattr(state, "capex_cash_payment_ratio", 1.0) or 0.0)))
+                cash_part = spend * ratio
+                financed_part = max(0.0, spend - cash_part)
+                state.cash -= cash_part
+                sr.cash_out += cash_part
+                store.cash_balance -= cash_part
+                if financed_part > 0:
+                    limit = max(0.0, float(getattr(state, "hq_credit_limit", 0.0) or 0.0))
+                    used = max(0.0, float(getattr(state, "hq_credit_used", 0.0) or 0.0))
+                    room = max(0.0, limit - used)
+                    draw = min(room, financed_part)
+                    if draw > 0:
+                        state.hq_credit_used = used + draw
+                        store.finance_credit_used = max(0.0, float(getattr(store, "finance_credit_used", 0.0) or 0.0)) + float(draw)
+                        sr.finance_capex_financed += float(draw)
+                    remain = max(0.0, financed_part - draw)
+                    if remain > 0:
+                        state.cash -= remain
+                        sr.cash_out += remain
+                        store.cash_balance -= remain
             store.construction_days_remaining = max(0, int(store.construction_days_remaining) - 1)
             if store.construction_days_remaining <= 0:
                 store.status = "open"
@@ -1194,7 +1298,12 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
         sr.workforce_capacity_factor = float(wf_daily[3])
         sr.shift_coverage_ratio = float(wf_daily[4]) if len(wf_daily) > 4 else 1.0
         sr.shift_overtime_cost = float(wf_daily[5]) if len(wf_daily) > 5 else 0.0
+        sr.workforce_leave_absent = int(wf_daily[6]) if len(wf_daily) > 6 else 0
+        sr.workforce_leave_planned = int(wf_daily[7]) if len(wf_daily) > 7 else 0
+        sr.workforce_leave_sick = int(wf_daily[8]) if len(wf_daily) > 8 else 0
+        sr.workforce_leave_cost = float(wf_daily[9]) if len(wf_daily) > 9 else 0.0
         sr.workforce_recruit_cost += float(sr.shift_overtime_cost)
+        sr.workforce_recruit_cost += float(sr.workforce_leave_cost)
         wf_cat_factors = _workforce_category_capacity_factors(store)
         wf_role_factors = _workforce_role_capacity_factors(store)
         if sr.workforce_capacity_factor > 0:
@@ -1206,6 +1315,10 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
                 "capacity_factor": float(sr.workforce_capacity_factor),
                 "shift_coverage_ratio": float(sr.shift_coverage_ratio),
                 "shift_overtime_cost": float(sr.shift_overtime_cost),
+                "leave_absent": int(sr.workforce_leave_absent),
+                "leave_planned": int(sr.workforce_leave_planned),
+                "leave_sick": int(sr.workforce_leave_sick),
+                "leave_cost": float(sr.workforce_leave_cost),
                 "category_factors": wf_cat_factors,
                 "role_factors": wf_role_factors,
             },
@@ -1542,6 +1655,7 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
 
     # HQ finance handling (P3)
     _apply_hq_finance(state, day_result)
+    _allocate_finance_cost_to_stores(state, day_result)
 
     # Persist RNG state so split runs stay reproducible.
     _persist_rng_state(state, rng)

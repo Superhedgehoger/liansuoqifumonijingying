@@ -9,6 +9,7 @@ import heapq
 import json
 import math
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import Body, FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -96,6 +97,92 @@ def create_app() -> FastAPI:
     data_dir()
 
     cfg = EngineConfig(month_len_days=30)
+    simulate_jobs: dict[str, dict] = {}
+    simulate_jobs_lock = threading.Lock()
+
+    def _now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _simulate_job_snapshot(job_id: str) -> Optional[dict]:
+        with simulate_jobs_lock:
+            j = simulate_jobs.get(job_id)
+            if j is None:
+                return None
+            return {
+                "job_id": str(j.get("job_id") or ""),
+                "status": str(j.get("status") or "unknown"),
+                "days": int(j.get("days") or 0),
+                "completed_days": int(j.get("completed_days") or 0),
+                "progress": float(j.get("progress") or 0.0),
+                "message": str(j.get("message") or ""),
+                "error": str(j.get("error") or ""),
+                "cancel_requested": bool(j.get("cancel_requested", False)),
+                "created_at": str(j.get("created_at") or ""),
+                "started_at": str(j.get("started_at") or ""),
+                "finished_at": str(j.get("finished_at") or ""),
+            }
+
+    def _has_active_simulation_job() -> bool:
+        with simulate_jobs_lock:
+            for j in simulate_jobs.values():
+                if str(j.get("status") or "") in {"pending", "running"}:
+                    return True
+        return False
+
+    def _run_simulate_job(job_id: str, days: int) -> None:
+        with simulate_jobs_lock:
+            j = simulate_jobs.get(job_id)
+            if not j:
+                return
+            j["status"] = "running"
+            j["started_at"] = _now_iso()
+            j["message"] = f"正在模拟 0/{days} 天"
+
+        try:
+            for i in range(days):
+                with simulate_jobs_lock:
+                    j = simulate_jobs.get(job_id)
+                    if not j:
+                        return
+                    if bool(j.get("cancel_requested", False)):
+                        j["status"] = "cancelled"
+                        j["message"] = f"已取消，已完成 {int(j.get('completed_days') or 0)}/{days} 天"
+                        j["finished_at"] = _now_iso()
+                        return
+
+                with _lock:
+                    state = _ensure_state()
+                    dr = simulate_day(state, cfg)
+                    append_ledger_csv(dr)
+                    save_snapshot(state)
+                    save_state(state)
+
+                done = i + 1
+                with simulate_jobs_lock:
+                    j = simulate_jobs.get(job_id)
+                    if not j:
+                        return
+                    j["completed_days"] = done
+                    j["progress"] = round(done / float(days), 6)
+                    j["message"] = f"正在模拟 {done}/{days} 天"
+
+            with simulate_jobs_lock:
+                j = simulate_jobs.get(job_id)
+                if not j:
+                    return
+                j["status"] = "succeeded"
+                j["progress"] = 1.0
+                j["message"] = f"模拟完成，共 {days} 天"
+                j["finished_at"] = _now_iso()
+        except Exception as e:
+            with simulate_jobs_lock:
+                j = simulate_jobs.get(job_id)
+                if not j:
+                    return
+                j["status"] = "failed"
+                j["error"] = str(e)
+                j["message"] = "模拟失败"
+                j["finished_at"] = _now_iso()
 
     @app.get("/")
     def root():
@@ -650,6 +737,24 @@ def create_app() -> FastAPI:
                 "recruiting_hire_rate_per_100_budget": float(
                     getattr(getattr(st, "workforce", None), "recruiting_hire_rate_per_100_budget", 0.20) or 0.0
                 ),
+                "planned_leave_rate": float(
+                    getattr(getattr(st, "workforce", None), "planned_leave_rate", 0.0) or 0.0
+                ),
+                "unplanned_absence_rate": float(
+                    getattr(getattr(st, "workforce", None), "unplanned_absence_rate", 0.0) or 0.0
+                ),
+                "planned_leave_rate_day": float(
+                    getattr(getattr(st, "workforce", None), "planned_leave_rate_day", 0.0) or 0.0
+                ),
+                "planned_leave_rate_night": float(
+                    getattr(getattr(st, "workforce", None), "planned_leave_rate_night", 0.0) or 0.0
+                ),
+                "sick_leave_rate_day": float(
+                    getattr(getattr(st, "workforce", None), "sick_leave_rate_day", 0.0) or 0.0
+                ),
+                "sick_leave_rate_night": float(
+                    getattr(getattr(st, "workforce", None), "sick_leave_rate_night", 0.0) or 0.0
+                ),
                 "shifts_per_day": int(getattr(getattr(st, "workforce", None), "shifts_per_day", 2) or 0),
                 "staffing_per_shift": int(getattr(getattr(st, "workforce", None), "staffing_per_shift", 3) or 0),
                 "shift_hours": float(getattr(getattr(st, "workforce", None), "shift_hours", 8.0) or 0.0),
@@ -745,6 +850,7 @@ def create_app() -> FastAPI:
             "payroll_preview": payroll_breakdown,
             "beq_orders_per_day": beq_orders,
             "payback_days_30d": payback,
+            "finance_credit_used": float(getattr(st, "finance_credit_used", 0.0) or 0.0),
         }
 
     def _read_ledger_entries(limit: int = 200) -> list[dict]:
@@ -1142,20 +1248,183 @@ def create_app() -> FastAPI:
         mtd_revenue = 0.0
         mtd_profit = 0.0
         mtd_cashflow = 0.0
+        mtd_finance_interest = 0.0
+        mtd_financed_capex = 0.0
         for r in rows:
             try:
                 d = int(r.get("day") or 0)
             except Exception:
                 continue
-            if d < month_start or d > min(int(state.day), month_end):
-                continue
+
+        def _sum_orders_json(raw: str) -> int:
             try:
-                mtd_revenue += float(r.get("revenue") or 0.0)
-                mtd_profit += float(r.get("operating_profit") or 0.0)
-                mtd_cashflow += float(r.get("net_cashflow") or 0.0)
+                obj = json.loads(raw) if raw else {}
+                if isinstance(obj, dict):
+                    return int(sum(max(0, int(v or 0)) for v in obj.values()))
+            except Exception:
+                pass
+            return 0
+
+        rolling_days = max(7, min(180, int(getattr(state, "rolling_budget_window_days", 30) or 30)))
+        rolling_start = max(1, int(state.day) - rolling_days + 1)
+        prev_start = max(1, rolling_start - rolling_days)
+        prev_end = rolling_start - 1
+
+        rolling_rev = 0.0
+        rolling_profit = 0.0
+        rolling_cashflow = 0.0
+        rolling_orders = 0
+        rolling_headcount = 0.0
+        prev_rev = 0.0
+        prev_profit = 0.0
+        prev_cashflow = 0.0
+
+        region_aggr: dict[str, dict] = {}
+        category_aggr: dict[str, dict] = {}
+        role_aggr: dict[str, dict] = {}
+        trend_daily: dict[int, dict] = {}
+
+        for r in rows:
+            try:
+                d = int(r.get("day") or 0)
+            except Exception:
+                continue
+            if d <= 0:
+                continue
+
+            try:
+                rev = float(r.get("revenue") or 0.0)
+                pft = float(r.get("operating_profit") or 0.0)
+                cfs = float(r.get("net_cashflow") or 0.0)
+                hc = max(0.0, float(r.get("workforce_headcount_end") or 0.0))
             except Exception:
                 continue
 
+            if prev_start <= d <= prev_end:
+                prev_rev += rev
+                prev_profit += pft
+                prev_cashflow += cfs
+
+            if d < rolling_start or d > int(state.day):
+                continue
+
+            rolling_rev += rev
+            rolling_profit += pft
+            rolling_cashflow += cfs
+            rolling_headcount += hc
+            od = _sum_orders_json(str(r.get("orders_by_service_json") or ""))
+            rolling_orders += od
+
+            sid = str(r.get("store_id") or "")
+            st = state.stores.get(sid)
+            city = str(getattr(st, "city", "") or "未分配")
+            district = str(getattr(st, "district", "") or "未分配")
+            region = f"{city}/{district}"
+            reg = region_aggr.setdefault(region, {"revenue": 0.0, "orders": 0, "headcount": 0.0})
+            reg["revenue"] += rev
+            reg["orders"] += od
+            reg["headcount"] += hc
+
+            try:
+                cat_rev = json.loads(str(r.get("revenue_by_category_json") or "{}"))
+            except Exception:
+                cat_rev = {}
+            if isinstance(cat_rev, dict):
+                for k, v in cat_rev.items():
+                    key = str(k or "other")
+                    row = category_aggr.setdefault(key, {"revenue": 0.0, "headcount": 0.0})
+                    row["revenue"] += max(0.0, float(v or 0.0))
+                    row["headcount"] += hc
+
+            role_weights: dict[str, float] = {}
+            try:
+                wb = json.loads(str(r.get("workforce_breakdown_json") or "{}"))
+                role_weights = (wb.get("role_factors") or {}) if isinstance(wb, dict) else {}
+            except Exception:
+                role_weights = {}
+            if not isinstance(role_weights, dict) or len(role_weights) == 0:
+                role_weights = {"技师": 1.0}
+            weight_sum = sum(max(0.0, float(x or 0.0)) for x in role_weights.values())
+            if weight_sum <= 0:
+                weight_sum = 1.0
+            role_hc_map = {}
+            if st is not None:
+                for rr in getattr(getattr(st, "payroll", None), "roles", {}).values():
+                    role_hc_map[str(getattr(rr, "role", "") or "")] = max(0.0, float(getattr(rr, "headcount", 0) or 0.0))
+            for role, w in role_weights.items():
+                rk = str(role or "未知")
+                wf = max(0.0, float(w or 0.0)) / weight_sum
+                row = role_aggr.setdefault(rk, {"revenue": 0.0, "headcount": 0.0})
+                row["revenue"] += rev * wf
+                row["headcount"] += max(0.0, float(role_hc_map.get(rk, 0.0) or 0.0))
+
+            td = trend_daily.setdefault(d, {"day": d, "revenue": 0.0, "profit": 0.0, "cashflow": 0.0, "orders": 0, "headcount": 0.0})
+            td["revenue"] += rev
+            td["profit"] += pft
+            td["cashflow"] += cfs
+            td["orders"] += od
+            td["headcount"] += hc
+
+        rolling_avg_rev = rolling_rev / float(rolling_days)
+        prev_avg_rev = prev_rev / float(rolling_days)
+        rolling_rev_momentum = 0.0
+        if abs(prev_avg_rev) > 1e-9:
+            rolling_rev_momentum = (rolling_avg_rev - prev_avg_rev) / abs(prev_avg_rev)
+
+        by_region = []
+        for k, v in region_aggr.items():
+            h = max(1.0, float(v.get("headcount") or 0.0))
+            by_region.append(
+                {
+                    "region": k,
+                    "revenue": float(round(float(v.get("revenue") or 0.0), 4)),
+                    "orders": int(v.get("orders") or 0),
+                    "headcount": float(round(float(v.get("headcount") or 0.0), 4)),
+                    "revenue_per_headcount": float(round(float(v.get("revenue") or 0.0) / h, 4)),
+                }
+            )
+        by_region.sort(key=lambda x: float(x.get("revenue", 0.0)), reverse=True)
+
+        by_category = []
+        for k, v in category_aggr.items():
+            h = max(1.0, float(v.get("headcount") or 0.0))
+            by_category.append(
+                {
+                    "category": str(k),
+                    "revenue": float(round(float(v.get("revenue") or 0.0), 4)),
+                    "headcount": float(round(float(v.get("headcount") or 0.0), 4)),
+                    "revenue_per_headcount": float(round(float(v.get("revenue") or 0.0) / h, 4)),
+                }
+            )
+        by_category.sort(key=lambda x: float(x.get("revenue", 0.0)), reverse=True)
+
+        by_role = []
+        for k, v in role_aggr.items():
+            h = max(1.0, float(v.get("headcount") or 0.0))
+            by_role.append(
+                {
+                    "role": str(k),
+                    "revenue": float(round(float(v.get("revenue") or 0.0), 4)),
+                    "headcount": float(round(float(v.get("headcount") or 0.0), 4)),
+                    "revenue_per_headcount": float(round(float(v.get("revenue") or 0.0) / h, 4)),
+                }
+            )
+        by_role.sort(key=lambda x: float(x.get("revenue", 0.0)), reverse=True)
+
+        trend_rows = []
+        for d in sorted(trend_daily.keys()):
+            it = trend_daily[d]
+            h = max(1.0, float(it.get("headcount") or 0.0))
+            trend_rows.append(
+                {
+                    "day": int(d),
+                    "revenue": float(round(float(it.get("revenue") or 0.0), 4)),
+                    "profit": float(round(float(it.get("profit") or 0.0), 4)),
+                    "cashflow": float(round(float(it.get("cashflow") or 0.0), 4)),
+                    "orders": int(it.get("orders") or 0),
+                    "revenue_per_headcount": float(round(float(it.get("revenue") or 0.0) / h, 4)),
+                }
+            )
         alerts: list[dict] = []
         cash = float(getattr(state, "cash", 0.0) or 0.0)
         if cash < 0:
@@ -1247,6 +1516,11 @@ def create_app() -> FastAPI:
                 "budget_monthly_cashflow_target": float(
                     getattr(state, "budget_monthly_cashflow_target", 0.0) or 0.0
                 ),
+                "capex_cash_payment_ratio": float(getattr(state, "capex_cash_payment_ratio", 1.0) or 0.0),
+                "rolling_budget_window_days": int(getattr(state, "rolling_budget_window_days", 30) or 30),
+                "finance_cost_allocation_method": str(
+                    getattr(state, "finance_cost_allocation_method", "revenue") or "revenue"
+                ),
                 "budget_mtd": {
                     "month_start_day": int(month_start),
                     "month_end_day": int(month_end),
@@ -1255,12 +1529,38 @@ def create_app() -> FastAPI:
                     "revenue": float(round(mtd_revenue, 4)),
                     "profit": float(round(mtd_profit, 4)),
                     "cashflow": float(round(mtd_cashflow, 4)),
+                    "finance_interest": float(round(mtd_finance_interest, 4)),
+                    "financed_capex": float(round(mtd_financed_capex, 4)),
+                },
+                "rolling_budget": {
+                    "window_days": int(rolling_days),
+                    "start_day": int(rolling_start),
+                    "end_day": int(state.day),
+                    "revenue": float(round(rolling_rev, 4)),
+                    "profit": float(round(rolling_profit, 4)),
+                    "cashflow": float(round(rolling_cashflow, 4)),
+                    "orders": int(rolling_orders),
+                    "avg_daily_revenue": float(round(rolling_avg_rev, 4)),
+                    "avg_daily_profit": float(round(rolling_profit / float(rolling_days), 4)),
+                    "avg_daily_cashflow": float(round(rolling_cashflow / float(rolling_days), 4)),
+                    "avg_revenue_per_headcount": float(
+                        round(rolling_rev / max(1.0, float(rolling_headcount)), 4)
+                    ),
+                    "revenue_momentum_vs_prev_window": float(round(rolling_rev_momentum, 6)),
                 },
             },
             "stations": [_station_to_dto(s) for s in state.stations.values()],
             "stores": [_store_to_dto(s) for s in state.stores.values()],
             "ledger": _read_ledger_entries(limit=200),
-            "insights": {"alerts": alerts[:300]},
+            "insights": {
+                "alerts": alerts[:300],
+                "productivity": {
+                    "by_region": by_region[:50],
+                    "by_category": by_category[:20],
+                    "by_role": by_role[:20],
+                    "trend_daily": trend_rows[-90:],
+                },
+            },
             "bulk_templates": {
                 "store_ops": [
                     {
@@ -1328,6 +1628,15 @@ def create_app() -> FastAPI:
                 state.budget_monthly_cashflow_target = max(
                     0.0, float(payload.get("budget_monthly_cashflow_target") or 0.0)
                 )
+            if "capex_cash_payment_ratio" in payload:
+                state.capex_cash_payment_ratio = max(0.0, min(1.0, float(payload.get("capex_cash_payment_ratio") or 0.0)))
+            if "rolling_budget_window_days" in payload:
+                state.rolling_budget_window_days = max(7, min(180, int(payload.get("rolling_budget_window_days") or 30)))
+            if "finance_cost_allocation_method" in payload:
+                m = str(payload.get("finance_cost_allocation_method") or "revenue").strip().lower()
+                if m not in {"revenue", "credit_usage"}:
+                    m = "revenue"
+                state.finance_cost_allocation_method = m
             # Optional manual repay
             if "manual_repay" in payload:
                 repay = max(0.0, float(payload.get("manual_repay") or 0.0))
@@ -1335,6 +1644,30 @@ def create_app() -> FastAPI:
                 if actual > 0:
                     state.cash -= actual
                     state.hq_credit_used = max(0.0, float(state.hq_credit_used) - actual)
+                    store_used = {
+                        sid: max(0.0, float(getattr(st, "finance_credit_used", 0.0) or 0.0))
+                        for sid, st in state.stores.items()
+                    }
+                    total_store_used = sum(store_used.values())
+                    if total_store_used > 0:
+                        left = float(actual)
+                        keys = list(store_used.keys())
+                        for idx, sid in enumerate(keys):
+                            st = state.stores[sid]
+                            used_i = store_used[sid]
+                            if used_i <= 0:
+                                continue
+                            if idx == len(keys) - 1:
+                                deduct = min(left, float(getattr(st, "finance_credit_used", 0.0) or 0.0))
+                            else:
+                                deduct = min(
+                                    left,
+                                    float(getattr(st, "finance_credit_used", 0.0) or 0.0),
+                                    actual * (used_i / total_store_used),
+                                )
+                            if deduct > 0:
+                                st.finance_credit_used = max(0.0, float(st.finance_credit_used) - deduct)
+                                left -= deduct
             save_state(state)
         return api_state()
 
@@ -1720,6 +2053,65 @@ def create_app() -> FastAPI:
             dto = _state_to_dto(state)
         return dto
 
+    @app.post("/api/simulate/async")
+    def api_simulate_async(payload: dict = Body(default={})):  # {days:int}
+        days = int(payload.get("days", 1) or 1)
+        days = max(1, min(3650, days))
+        if _has_active_simulation_job():
+            return {
+                "error": "simulation job already running",
+                "code": "simulation_busy",
+            }
+        job_id = f"sim_{uuid.uuid4().hex[:12]}"
+        with simulate_jobs_lock:
+            simulate_jobs[job_id] = {
+                "job_id": job_id,
+                "status": "pending",
+                "days": days,
+                "completed_days": 0,
+                "progress": 0.0,
+                "message": f"任务已创建，待执行（0/{days}）",
+                "error": "",
+                "cancel_requested": False,
+                "created_at": _now_iso(),
+                "started_at": "",
+                "finished_at": "",
+            }
+        t = threading.Thread(target=_run_simulate_job, args=(job_id, days), daemon=True)
+        t.start()
+        snapshot = _simulate_job_snapshot(job_id)
+        return snapshot or {"error": "job_create_failed"}
+
+    @app.get("/api/simulate/jobs/{job_id}")
+    def api_simulate_job_status(job_id: str):
+        snapshot = _simulate_job_snapshot(job_id)
+        if snapshot is None:
+            return {
+                "error": "job_not_found",
+                "job_id": job_id,
+            }
+        return snapshot
+
+    @app.post("/api/simulate/jobs/{job_id}/cancel")
+    def api_simulate_job_cancel(job_id: str):
+        should_return_snapshot = False
+        with simulate_jobs_lock:
+            j = simulate_jobs.get(job_id)
+            if j is None:
+                return {
+                    "error": "job_not_found",
+                    "job_id": job_id,
+                }
+            st = str(j.get("status") or "")
+            if st in {"succeeded", "failed", "cancelled"}:
+                should_return_snapshot = True
+            else:
+                j["cancel_requested"] = True
+                j["message"] = "已请求取消，正在结束当前步..."
+        if should_return_snapshot:
+            return _simulate_job_snapshot(job_id)
+        return _simulate_job_snapshot(job_id)
+
     @app.post("/api/rollback")
     def api_rollback(payload: dict = Body(default={})):  # {days:int}
         days = int(payload.get("days", 1) or 1)
@@ -1923,6 +2315,26 @@ def create_app() -> FastAPI:
                     if "recruiting_hire_rate_per_100_budget" in w:
                         wf.recruiting_hire_rate_per_100_budget = max(
                             0.0, float(w.get("recruiting_hire_rate_per_100_budget") or 0.0)
+                        )
+                    if "planned_leave_rate" in w:
+                        wf.planned_leave_rate = max(0.0, min(1.0, float(w.get("planned_leave_rate") or 0.0)))
+                    if "unplanned_absence_rate" in w:
+                        wf.unplanned_absence_rate = max(
+                            0.0, min(1.0, float(w.get("unplanned_absence_rate") or 0.0))
+                        )
+                    if "planned_leave_rate_day" in w:
+                        wf.planned_leave_rate_day = max(
+                            0.0, min(1.0, float(w.get("planned_leave_rate_day") or 0.0))
+                        )
+                    if "planned_leave_rate_night" in w:
+                        wf.planned_leave_rate_night = max(
+                            0.0, min(1.0, float(w.get("planned_leave_rate_night") or 0.0))
+                        )
+                    if "sick_leave_rate_day" in w:
+                        wf.sick_leave_rate_day = max(0.0, min(1.0, float(w.get("sick_leave_rate_day") or 0.0)))
+                    if "sick_leave_rate_night" in w:
+                        wf.sick_leave_rate_night = max(
+                            0.0, min(1.0, float(w.get("sick_leave_rate_night") or 0.0))
                         )
                     if "shifts_per_day" in w:
                         wf.shifts_per_day = max(1, int(w.get("shifts_per_day") or 1))

@@ -31,10 +31,13 @@ import {
   apiImportLedgerFile,
   apiImportStateFile,
   apiGetSiteRecommendations,
+  apiGetSimulateJobStatus,
   apiInjectEvent,
   apiPurchaseInventory,
   apiRollback,
   apiReset,
+  apiStartSimulateAsync,
+  apiCancelSimulateJob,
   apiSetEventSeed,
   apiSimulate,
   apiUpsertReplenishmentRule,
@@ -147,8 +150,18 @@ const ImportDataModal = ({
   const [ledgerFile, setLedgerFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string>('');
+  const stateInputRef = React.useRef<HTMLInputElement | null>(null);
+  const ledgerInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const clearPickedFiles = () => {
+    setStateFile(null);
+    setLedgerFile(null);
+    if (stateInputRef.current) stateInputRef.current.value = '';
+    if (ledgerInputRef.current) ledgerInputRef.current.value = '';
+  };
 
   const doImport = async () => {
+    if (loading) return;
     if (!stateFile && !ledgerFile) {
       setMsg('请至少选择一个文件');
       return;
@@ -158,10 +171,16 @@ const ImportDataModal = ({
     try {
       if (stateFile) await apiImportStateFile(stateFile);
       if (ledgerFile) await apiImportLedgerFile(ledgerFile);
-      await onImported();
+      await Promise.race([
+        onImported(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('刷新状态超时，请手动刷新页面')), 15000)),
+      ]);
       setMsg('导入成功');
+      clearPickedFiles();
+      setTimeout(() => onClose(), 300);
     } catch (e: any) {
-      setMsg(String(e?.message || e || '导入失败'));
+      const message = String(e?.name === 'AbortError' ? '导入超时，请重试' : (e?.message || e || '导入失败'));
+      setMsg(message);
     } finally {
       setLoading(false);
     }
@@ -172,7 +191,7 @@ const ImportDataModal = ({
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
         <div className="p-6 border-b border-slate-200 flex items-center justify-between">
           <div>
-            <div className="text-lg font-bold text-slate-900">导入测试数据</div>
+            <div className="text-lg font-bold text-slate-900">导入数据</div>
             <div className="text-xs text-slate-500 mt-1">可上传 `state.json` 与 `ledger.csv`，立即覆盖当前数据。</div>
           </div>
           <button onClick={onClose} className="text-slate-500 hover:text-slate-900">
@@ -183,11 +202,29 @@ const ImportDataModal = ({
         <div className="p-6 space-y-4">
           <div>
             <div className="text-xs font-bold text-slate-500 uppercase mb-1">state.json</div>
-            <input type="file" accept="application/json,.json" onChange={(e) => setStateFile(e.target.files?.[0] || null)} className="block w-full text-sm" />
+            <input
+              ref={stateInputRef}
+              type="file"
+              accept="application/json,.json"
+              onChange={(e) => {
+                setStateFile(e.target.files?.[0] || null);
+                setMsg('');
+              }}
+              className="block w-full text-sm"
+            />
           </div>
           <div>
             <div className="text-xs font-bold text-slate-500 uppercase mb-1">ledger.csv</div>
-            <input type="file" accept="text/csv,.csv" onChange={(e) => setLedgerFile(e.target.files?.[0] || null)} className="block w-full text-sm" />
+            <input
+              ref={ledgerInputRef}
+              type="file"
+              accept="text/csv,.csv"
+              onChange={(e) => {
+                setLedgerFile(e.target.files?.[0] || null);
+                setMsg('');
+              }}
+              className="block w-full text-sm"
+            />
           </div>
           <div className="text-xs text-slate-500">生成与导入后的文件都在：`data/state.json`、`data/ledger.csv`、`data/snapshots/`（项目根目录）。</div>
           {msg && <div className="text-sm text-slate-700 bg-slate-100 rounded-lg px-3 py-2">{msg}</div>}
@@ -235,6 +272,50 @@ const TemplateCenterModal = ({ onClose }: { onClose: () => void }) => {
     URL.revokeObjectURL(url);
   };
 
+  const exportAllTemplatesCsv = () => {
+    const esc = (v: unknown) => {
+      const s = String(v ?? '');
+      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+
+    const rows: string[] = [];
+    rows.push(['template_type', 'name', 'status', 'inv', 'asset', 'fuel_factor', 'visitor_factor'].join(','));
+
+    for (const t of storeTemplates) {
+      rows.push([
+        esc('store_ops'),
+        esc(t.name),
+        esc(t.status),
+        esc(t.inv),
+        esc(t.asset),
+        esc(''),
+        esc(''),
+      ].join(','));
+    }
+
+    for (const t of stationTemplates) {
+      rows.push([
+        esc('station_ops'),
+        esc(t.name),
+        esc(''),
+        esc(''),
+        esc(''),
+        esc(t.fuel_factor),
+        esc(t.visitor_factor),
+      ].join(','));
+    }
+
+    const csv = `\uFEFF${rows.join('\n')}`;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `all-bulk-templates-${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden">
@@ -247,9 +328,12 @@ const TemplateCenterModal = ({ onClose }: { onClose: () => void }) => {
         </div>
 
         <div className="px-6 pt-4">
-          <div className="bg-slate-100 p-1 rounded-lg inline-flex">
-            <button onClick={() => setTab('store')} className={`px-3 py-1.5 rounded-md text-sm font-medium ${tab === 'store' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}>门店模板</button>
-            <button onClick={() => setTab('station')} className={`px-3 py-1.5 rounded-md text-sm font-medium ${tab === 'station' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}>站点模板</button>
+          <div className="flex items-center justify-between gap-3">
+            <div className="bg-slate-100 p-1 rounded-lg inline-flex">
+              <button onClick={() => setTab('store')} className={`px-3 py-1.5 rounded-md text-sm font-medium ${tab === 'store' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}>门店模板</button>
+              <button onClick={() => setTab('station')} className={`px-3 py-1.5 rounded-md text-sm font-medium ${tab === 'station' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'}`}>站点模板</button>
+            </div>
+            <button onClick={exportAllTemplatesCsv} className="h-9 px-3 rounded-lg border border-blue-300 text-blue-700 bg-blue-50 text-sm font-semibold hover:bg-blue-100">导出全部CSV</button>
           </div>
         </div>
 
@@ -354,6 +438,10 @@ const TemplateCenterModal = ({ onClose }: { onClose: () => void }) => {
 const Header = () => {
   const { state, dispatch } = React.useContext(StateContext);
   const [isSimulating, setIsSimulating] = useState(false);
+  const [simulatingHint, setSimulatingHint] = useState('');
+  const [simProgress, setSimProgress] = useState(0);
+  const [simJobId, setSimJobId] = useState('');
+  const [simCancelable, setSimCancelable] = useState(false);
   const [daysInput, setDaysInput] = useState<number>(7);
   const [importOpen, setImportOpen] = useState(false);
   const [templateCenterOpen, setTemplateCenterOpen] = useState(false);
@@ -363,32 +451,101 @@ const Header = () => {
   if (location.pathname === '/gis') return null;
 
   const handleSimulate = async (days: number) => {
+    const n = Math.max(1, Math.min(3650, Number(days) || 1));
+    setSimulatingHint(`正在创建模拟任务（${n} 天）...`);
+    setSimProgress(0);
+    setSimJobId('');
+    setSimCancelable(false);
     setIsSimulating(true);
     try {
-      await dispatch({ type: 'SIMULATE_DAY', payload: days });
+      const created = await apiStartSimulateAsync(n);
+      if (!created?.job_id || created?.error || created?.code === 'simulation_busy') {
+        throw new Error(created?.error || '已有模拟任务在执行，请稍后再试');
+      }
+      const jobId = String(created.job_id);
+      setSimJobId(jobId);
+      setSimCancelable(true);
+      setSimulatingHint(created.message || `正在模拟 0/${n} 天`);
+      setSimProgress(Math.max(0, Math.min(1, Number(created.progress) || 0)));
+
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        const status = await apiGetSimulateJobStatus(jobId);
+        const st = String(status?.status || '');
+        const progress = Math.max(0, Math.min(1, Number(status?.progress) || 0));
+        setSimProgress(progress);
+        setSimulatingHint(status?.message || `正在模拟 ${status?.completed_days || 0}/${status?.days || n} 天`);
+
+        if (st === 'pending' || st === 'running') continue;
+
+        if (st === 'succeeded') {
+          const next = await apiGetState();
+          await dispatch({ type: 'SET_STATE', payload: next } as any);
+          break;
+        }
+        if (st === 'cancelled') {
+          window.alert('模拟已取消');
+          break;
+        }
+        throw new Error(status?.error || status?.message || '模拟失败');
+      }
+    } catch (e: any) {
+      const message = String(e?.message || e || '模拟失败');
+      window.alert(message);
     } finally {
       setIsSimulating(false);
+      setSimulatingHint('');
+      setSimProgress(0);
+      setSimJobId('');
+      setSimCancelable(false);
+    }
+  };
+
+  const handleCancelSimulate = async () => {
+    if (!simJobId || !simCancelable) return;
+    setSimCancelable(false);
+    setSimulatingHint('已请求取消，正在结束当前步...');
+    try {
+      await apiCancelSimulateJob(simJobId);
+    } catch (e: any) {
+      const message = String(e?.message || e || '取消失败');
+      window.alert(message);
     }
   };
 
   const handleRollback = async () => {
     const days = Math.max(1, Math.min(365, Number(daysInput) || 1));
     if (!window.confirm(`确认回退 ${days} 天？`)) return;
+    setSimulatingHint(`正在回退 ${days} 天，请稍候...`);
+    setSimProgress(0);
+    setSimJobId('');
+    setSimCancelable(false);
     setIsSimulating(true);
     try {
       await dispatch({ type: 'ROLLBACK_DAYS', payload: days });
     } finally {
       setIsSimulating(false);
+      setSimulatingHint('');
     }
   };
 
   const handleReset = async () => {
     if (!window.confirm('确认重置模拟数据？这会清空 state.json/ledger.csv/snapshots。')) return;
+    setSimulatingHint('正在重置模拟数据，请稍候...');
+    setSimProgress(0);
+    setSimJobId('');
+    setSimCancelable(false);
     setIsSimulating(true);
     try {
-      await dispatch({ type: 'RESET_SIM' });
+      const next = await apiReset();
+      await dispatch({ type: 'SET_STATE', payload: next } as any);
+      window.alert('重置成功');
+    } catch (e: any) {
+      const message = String(e?.message || e || '重置失败');
+      window.alert(message);
     } finally {
       setIsSimulating(false);
+      setSimulatingHint('');
     }
   };
 
@@ -430,7 +587,7 @@ const Header = () => {
           <button
             onClick={() => setImportOpen(true)}
             className="h-9 px-3 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold hover:bg-white hover:shadow-sm"
-            title="打开测试数据导入弹窗"
+            title="打开数据导入弹窗"
           >
             导入/导出
           </button>
@@ -489,6 +646,25 @@ const Header = () => {
           await dispatch({ type: 'SET_STATE', payload: next } as any);
         }}
       />
+    )}
+    {isSimulating && (
+      <div className="fixed top-20 right-6 z-50 max-w-sm rounded-lg border border-blue-200 bg-white/95 shadow-lg px-4 py-3">
+        <div className="flex items-center gap-2 text-blue-700">
+          <span className="material-symbols-outlined animate-spin text-[18px]">progress_activity</span>
+          <span className="text-sm font-semibold">{simulatingHint || '正在模拟中，请稍候...'}</span>
+        </div>
+        {simJobId && (
+          <>
+            <div className="mt-2 h-2 rounded bg-blue-100 overflow-hidden">
+              <div className="h-full bg-blue-600 transition-all duration-300" style={{ width: `${Math.round(simProgress * 100)}%` }} />
+            </div>
+            <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
+              <span>进度 {Math.round(simProgress * 100)}%</span>
+              <button onClick={handleCancelSimulate} disabled={!simCancelable} className="px-2 py-1 rounded border border-slate-300 text-slate-600 disabled:opacity-50">取消</button>
+            </div>
+          </>
+        )}
+      </div>
     )}
     {templateCenterOpen && <TemplateCenterModal onClose={() => setTemplateCenterOpen(false)} />}
     </>
@@ -2984,7 +3160,7 @@ const DataOpsPage = () => {
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">测试数据导入导出</h1>
+        <h1 className="text-2xl font-bold text-slate-900">数据导入导出</h1>
         <p className="text-slate-500 mt-1">已支持前端弹窗导入；也保留后端运维页入口。</p>
       </div>
 
@@ -3792,6 +3968,18 @@ const StrategyPage = () => {
   const [ruleDraft, setRuleDraft] = useState<any>({ sku: '', reorder_point: 50, safety_stock: 80, target_stock: 150, lead_time_days: 2, unit_cost: 0 });
   const [workforceDraft, setWorkforceDraft] = useState<any>({});
   const [financeDraft, setFinanceDraft] = useState<any>({});
+  const [biRegionQuery, setBiRegionQuery] = useState('');
+  const [biCategoryQuery, setBiCategoryQuery] = useState('');
+  const [biRoleQuery, setBiRoleQuery] = useState('');
+  const [biTrendWindow, setBiTrendWindow] = useState(30);
+
+  const filteredBi = useMemo(() => {
+    const byRegion = (state.insights?.productivity?.by_region || []).filter((r: any) => String(r.region || '').includes(biRegionQuery));
+    const byCategory = (state.insights?.productivity?.by_category || []).filter((r: any) => String(r.category || '').includes(biCategoryQuery));
+    const byRole = (state.insights?.productivity?.by_role || []).filter((r: any) => String(r.role || '').includes(biRoleQuery));
+    const trend = (state.insights?.productivity?.trend_daily || []).slice(-Math.max(7, Math.min(90, Number(biTrendWindow) || 30)));
+    return { byRegion, byCategory, byRole, trend };
+  }, [state.insights?.productivity, biRegionQuery, biCategoryQuery, biRoleQuery, biTrendWindow]);
 
   const workforceBreakdown = useMemo(() => {
     const shifts = Math.max(1, Number(workforceDraft.shifts_per_day ?? 2) || 1);
@@ -4070,6 +4258,12 @@ const StrategyPage = () => {
                     <label>招聘预算/日<input type="number" value={Number(workforceDraft.recruiting_daily_budget ?? 0)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,recruiting_daily_budget:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
                     <label>招聘提前期<input type="number" value={Number(workforceDraft.recruiting_lead_days ?? 7)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,recruiting_lead_days:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
                     <label>转化率/100元<input type="number" step="0.01" value={Number(workforceDraft.recruiting_hire_rate_per_100_budget ?? 0.2)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,recruiting_hire_rate_per_100_budget:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>计划请假率<input type="number" step="0.001" min={0} max={1} value={Number(workforceDraft.planned_leave_rate ?? 0)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,planned_leave_rate:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>临时缺勤率<input type="number" step="0.001" min={0} max={1} value={Number(workforceDraft.unplanned_absence_rate ?? 0)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,unplanned_absence_rate:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>早班计划请假率<input type="number" step="0.001" min={0} max={1} value={Number(workforceDraft.planned_leave_rate_day ?? 0)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,planned_leave_rate_day:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>晚班计划请假率<input type="number" step="0.001" min={0} max={1} value={Number(workforceDraft.planned_leave_rate_night ?? 0)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,planned_leave_rate_night:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>早班病假率<input type="number" step="0.001" min={0} max={1} value={Number(workforceDraft.sick_leave_rate_day ?? 0)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,sick_leave_rate_day:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+                    <label>晚班病假率<input type="number" step="0.001" min={0} max={1} value={Number(workforceDraft.sick_leave_rate_night ?? 0)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,sick_leave_rate_night:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
                     <label>班次数/日<input type="number" min={1} value={Number(workforceDraft.shifts_per_day ?? 2)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shifts_per_day:Number(e.target.value)||1}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
                     <label>每班配置<input type="number" min={1} value={Number(workforceDraft.staffing_per_shift ?? 3)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,staffing_per_shift:Number(e.target.value)||1}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
                     <label>班次时长<input type="number" min={1} value={Number(workforceDraft.shift_hours ?? 8)} onChange={(e)=>setWorkforceDraft((p:any)=>({...p,shift_hours:Number(e.target.value)||1}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
@@ -4155,6 +4349,14 @@ const StrategyPage = () => {
             <label>月营收预算<input type="number" value={Number(financeDraft.budget_monthly_revenue_target ?? 0)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,budget_monthly_revenue_target:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
             <label>月利润预算<input type="number" value={Number(financeDraft.budget_monthly_profit_target ?? 0)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,budget_monthly_profit_target:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
             <label className="col-span-2">月现金流预算<input type="number" value={Number(financeDraft.budget_monthly_cashflow_target ?? 0)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,budget_monthly_cashflow_target:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+            <label>CAPEX现金支付比例<input type="number" step="0.05" min={0} max={1} value={Number(financeDraft.capex_cash_payment_ratio ?? 1)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,capex_cash_payment_ratio:Number(e.target.value)||0}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+            <label>滚动预算窗口(天)<input type="number" min={7} max={180} value={Number(financeDraft.rolling_budget_window_days ?? 30)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,rolling_budget_window_days:Number(e.target.value)||30}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 font-mono"/></label>
+            <label>融资成本归集方式
+              <select value={String(financeDraft.finance_cost_allocation_method ?? 'revenue')} onChange={(e)=>setFinanceDraft((p:any)=>({...p,finance_cost_allocation_method:e.target.value}))} className="mt-1 w-full h-9 rounded border border-slate-200 px-2 text-sm">
+                <option value="revenue">按营收分摊</option>
+                <option value="credit_usage">按融资占用分摊</option>
+              </select>
+            </label>
             <label className="col-span-2 flex items-center gap-2"><input type="checkbox" checked={Boolean(financeDraft.hq_auto_finance)} onChange={(e)=>setFinanceDraft((p:any)=>({...p,hq_auto_finance:e.target.checked}))}/>自动融资（现金为负时自动提额）</label>
             <button onClick={saveFinance} className="h-9 px-3 rounded-lg bg-slate-900 text-white text-xs font-semibold w-fit">保存融资策略</button>
             <div className="col-span-2 text-sm text-slate-600">当前授信占用：{Number(state.finance?.hq_credit_used ?? 0).toFixed(2)} / {Number(state.finance?.hq_credit_limit ?? 0).toFixed(2)}</div>
@@ -4163,6 +4365,10 @@ const StrategyPage = () => {
               营收 {Number(state.finance?.budget_mtd?.revenue ?? 0).toFixed(0)} ｜
               利润 {Number(state.finance?.budget_mtd?.profit ?? 0).toFixed(0)} ｜
               现金流 {Number(state.finance?.budget_mtd?.cashflow ?? 0).toFixed(0)}
+            </div>
+            <div className="col-span-2 text-sm text-slate-600">
+              融资成本(MTD) {Number(state.finance?.budget_mtd?.finance_interest ?? 0).toFixed(2)} ｜
+              融资CAPEX(MTD) {Number(state.finance?.budget_mtd?.financed_capex ?? 0).toFixed(2)}
             </div>
           </div>
           <div>
@@ -4174,6 +4380,16 @@ const StrategyPage = () => {
                 </div>
               ))}
               {(state.insights?.alerts || []).length === 0 && <div className="text-sm text-slate-500">暂无预警</div>}
+            </div>
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs font-bold text-slate-500 uppercase mb-1">滚动预算趋势</div>
+              <div className="text-xs text-slate-600 space-y-1">
+                <div>窗口：最近 {Number(state.finance?.rolling_budget?.window_days ?? 0)} 天</div>
+                <div>日均营收：{Number(state.finance?.rolling_budget?.avg_daily_revenue ?? 0).toFixed(2)}</div>
+                <div>日均利润：{Number(state.finance?.rolling_budget?.avg_daily_profit ?? 0).toFixed(2)}</div>
+                <div>日均现金流：{Number(state.finance?.rolling_budget?.avg_daily_cashflow ?? 0).toFixed(2)}</div>
+                <div>营收动量：{(Number(state.finance?.rolling_budget?.revenue_momentum_vs_prev_window ?? 0) * 100).toFixed(2)}%</div>
+              </div>
             </div>
           </div>
         </div>
@@ -4200,6 +4416,57 @@ const StrategyPage = () => {
                     <div key={r.key} className="flex justify-between"><span>{r.key}</span><span className={`font-mono ${r.factor < 1 ? 'text-rose-600' : r.factor > 1 ? 'text-emerald-600' : 'text-slate-700'}`}>{r.factor.toFixed(3)}</span></div>
                   ))}
                 </div>
+              </div>
+            </div>
+          </div>
+          <div className="rounded-xl border border-slate-200 p-4 bg-slate-50 mt-4">
+            <div className="font-semibold text-slate-800 mb-2">BI 人效钻取（区域/业态/角色）</div>
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-2 mb-3 text-xs">
+              <input value={biRegionQuery} onChange={(e)=>setBiRegionQuery(e.target.value)} placeholder="筛选区域" className="h-8 rounded border border-slate-200 px-2" />
+              <input value={biCategoryQuery} onChange={(e)=>setBiCategoryQuery(e.target.value)} placeholder="筛选业态" className="h-8 rounded border border-slate-200 px-2" />
+              <input value={biRoleQuery} onChange={(e)=>setBiRoleQuery(e.target.value)} placeholder="筛选角色" className="h-8 rounded border border-slate-200 px-2" />
+              <select value={biTrendWindow} onChange={(e)=>setBiTrendWindow(Number(e.target.value) || 30)} className="h-8 rounded border border-slate-200 px-2">
+                <option value={7}>趋势窗口 7 天</option>
+                <option value={14}>趋势窗口 14 天</option>
+                <option value={30}>趋势窗口 30 天</option>
+                <option value={60}>趋势窗口 60 天</option>
+                <option value={90}>趋势窗口 90 天</option>
+              </select>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <div>
+                <div className="text-xs font-bold text-slate-500 uppercase mb-1">区域</div>
+                <div className="space-y-1 text-xs max-h-40 overflow-auto">
+                  {(filteredBi.byRegion || []).slice(0, 8).map((r: any) => (
+                    <div key={r.region} className="flex justify-between gap-2"><span className="truncate">{r.region}</span><span className="font-mono">{Number(r.revenue_per_headcount || 0).toFixed(1)}</span></div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs font-bold text-slate-500 uppercase mb-1">业态</div>
+                <div className="space-y-1 text-xs max-h-40 overflow-auto">
+                  {(filteredBi.byCategory || []).slice(0, 8).map((r: any) => (
+                    <div key={r.category} className="flex justify-between gap-2"><span>{r.category}</span><span className="font-mono">{Number(r.revenue_per_headcount || 0).toFixed(1)}</span></div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs font-bold text-slate-500 uppercase mb-1">角色</div>
+                <div className="space-y-1 text-xs max-h-40 overflow-auto">
+                  {(filteredBi.byRole || []).slice(0, 8).map((r: any) => (
+                    <div key={r.role} className="flex justify-between gap-2"><span>{r.role}</span><span className="font-mono">{Number(r.revenue_per_headcount || 0).toFixed(1)}</span></div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="mt-3">
+              <div className="text-xs font-bold text-slate-500 uppercase mb-1">近{Math.max(7, Math.min(90, Number(biTrendWindow) || 30))}天人效趋势（营收/人）</div>
+              <div className="flex items-end gap-1 h-16">
+                {(filteredBi.trend || []).map((p: any) => {
+                  const v = Number(p.revenue_per_headcount || 0);
+                  const h = Math.max(4, Math.min(60, v / 20));
+                  return <div key={String(p.day)} title={`D${p.day}: ${v.toFixed(2)}`} className="w-2 bg-blue-400/80 rounded-sm" style={{ height: `${h}px` }} />;
+                })}
               </div>
             </div>
           </div>
