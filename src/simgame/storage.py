@@ -423,6 +423,25 @@ def load_state(path: Path | None = None) -> GameState:
     state.hq_credit_limit = max(0.0, float(d.get("hq_credit_limit", 0.0) or 0.0))
     state.hq_credit_used = max(0.0, float(d.get("hq_credit_used", 0.0) or 0.0))
     state.hq_daily_interest_rate = max(0.0, float(d.get("hq_daily_interest_rate", 0.0005) or 0.0))
+    state.hq_short_credit_limit = max(0.0, float(d.get("hq_short_credit_limit", 0.0) or 0.0))
+    state.hq_short_credit_used = max(0.0, float(d.get("hq_short_credit_used", 0.0) or 0.0))
+    state.hq_short_daily_interest_rate = max(0.0, float(d.get("hq_short_daily_interest_rate", 0.0008) or 0.0))
+    state.hq_medium_credit_limit = max(0.0, float(d.get("hq_medium_credit_limit", 0.0) or 0.0))
+    state.hq_medium_credit_used = max(0.0, float(d.get("hq_medium_credit_used", 0.0) or 0.0))
+    state.hq_medium_daily_interest_rate = max(0.0, float(d.get("hq_medium_daily_interest_rate", 0.0004) or 0.0))
+    state.hq_credit_draw_mix_short_ratio = max(0.0, min(1.0, float(d.get("hq_credit_draw_mix_short_ratio", 0.7) or 0.0)))
+    if state.hq_short_credit_limit <= 0 and state.hq_medium_credit_limit <= 0 and state.hq_credit_limit > 0:
+        state.hq_short_credit_limit = state.hq_credit_limit * state.hq_credit_draw_mix_short_ratio
+        state.hq_medium_credit_limit = max(0.0, state.hq_credit_limit - state.hq_short_credit_limit)
+    if state.hq_short_credit_used <= 0 and state.hq_medium_credit_used <= 0 and state.hq_credit_used > 0:
+        short_room = max(0.0, state.hq_short_credit_limit)
+        medium_room = max(0.0, state.hq_medium_credit_limit)
+        total_room = short_room + medium_room
+        if total_room > 0:
+            state.hq_short_credit_used = state.hq_credit_used * (short_room / total_room)
+            state.hq_medium_credit_used = max(0.0, state.hq_credit_used - state.hq_short_credit_used)
+    state.hq_credit_limit = max(0.0, state.hq_short_credit_limit) + max(0.0, state.hq_medium_credit_limit)
+    state.hq_credit_used = max(0.0, state.hq_short_credit_used) + max(0.0, state.hq_medium_credit_used)
     state.hq_auto_finance = bool(d.get("hq_auto_finance", False))
     state.budget_monthly_revenue_target = max(0.0, float(d.get("budget_monthly_revenue_target", 0.0) or 0.0))
     state.budget_monthly_profit_target = max(0.0, float(d.get("budget_monthly_profit_target", 0.0) or 0.0))
@@ -459,6 +478,50 @@ def load_state(path: Path | None = None) -> GameState:
                 visitor_factor=max(0.0, float(t.get("visitor_factor", 1.0) or 0.0)),
             )
         )
+    state.bi_action_templates = []
+    for t in (d.get("bi_action_templates") or []):
+        if not isinstance(t, dict):
+            continue
+        name = str(t.get("name") or "").strip()
+        if not name:
+            continue
+        actions = t.get("actions") if isinstance(t.get("actions"), list) else []
+        normalized_actions = [a for a in actions if isinstance(a, dict)][:200]
+        state.bi_action_templates.append(
+            {
+                "name": name,
+                "description": str(t.get("description") or "").strip(),
+                "actions": normalized_actions,
+                "created_at": str(t.get("created_at") or ""),
+                "updated_at": str(t.get("updated_at") or ""),
+            }
+        )
+    state.bi_action_templates = state.bi_action_templates[:50]
+
+    state.bi_action_checkpoints = []
+    for cp in (d.get("bi_action_checkpoints") or []):
+        if not isinstance(cp, dict):
+            continue
+        checkpoint_id = str(cp.get("checkpoint_id") or "").strip()
+        if not checkpoint_id:
+            continue
+        payload = cp.get("payload") if isinstance(cp.get("payload"), dict) else {}
+        if payload and not isinstance(payload.get("state"), dict):
+            payload = {}
+        actions = cp.get("actions") if isinstance(cp.get("actions"), list) else []
+        normalized_actions = [a for a in actions if isinstance(a, dict)][:200]
+        state.bi_action_checkpoints.append(
+            {
+                "checkpoint_id": checkpoint_id,
+                "name": str(cp.get("name") or "").strip(),
+                "reason": str(cp.get("reason") or "").strip(),
+                "day": int(cp.get("day", state.day) or state.day),
+                "created_at": str(cp.get("created_at") or ""),
+                "actions": normalized_actions,
+                "payload": payload,
+            }
+        )
+    state.bi_action_checkpoints = state.bi_action_checkpoints[:100]
     _seed_default_event_templates(state)
 
     # Stations
@@ -553,6 +616,12 @@ def load_state(path: Path | None = None) -> GameState:
             planned_leave_rate_night=max(0.0, min(1.0, float(wf_raw.get("planned_leave_rate_night", 0.0) or 0.0))),
             sick_leave_rate_day=max(0.0, min(1.0, float(wf_raw.get("sick_leave_rate_day", 0.0) or 0.0))),
             sick_leave_rate_night=max(0.0, min(1.0, float(wf_raw.get("sick_leave_rate_night", 0.0) or 0.0))),
+            auto_schedule_enabled=bool(wf_raw.get("auto_schedule_enabled", False)),
+            auto_recruit_budget_enabled=bool(wf_raw.get("auto_recruit_budget_enabled", False)),
+            auto_target_coverage=max(0.5, min(1.2, float(wf_raw.get("auto_target_coverage", 0.9) or 0.9))),
+            auto_productivity_floor=max(0.0, float(wf_raw.get("auto_productivity_floor", 250.0) or 0.0)),
+            auto_recruit_budget_min=max(0.0, float(wf_raw.get("auto_recruit_budget_min", 0.0) or 0.0)),
+            auto_recruit_budget_max=max(0.0, float(wf_raw.get("auto_recruit_budget_max", 5000.0) or 0.0)),
             shifts_per_day=max(1, int(wf_raw.get("shifts_per_day", 2) or 1)),
             staffing_per_shift=max(1, int(wf_raw.get("staffing_per_shift", 3) or 1)),
             shift_hours=max(1.0, float(wf_raw.get("shift_hours", 8.0) or 1.0)),

@@ -1,5 +1,63 @@
 # 更新日志
 
+## 0.7.6
+
+- 后端新增BI动作回滚预览API（`/api/bi/actions/rollback/preview`）：对比当前状态与检查点状态，返回 day/cash/hq_credit_used/store_count/total_headcount 差异
+- 后端新增 `_compare_states_for_rollback` 函数：用于计算回滚前后指标变化
+- 前端新增 API 客户端：`apiUpsertBiActionTemplate`、`apiDeleteBiActionTemplate`、`apiPreviewRollbackBiActions`
+- 前端新增类型定义：`BiActionTemplate`、`RollbackPreviewResult`
+- 修复前端基础语法错误：DataOpsPage 缺失状态变量问题
+- 前后端编译验证通过
+
+## 0.7.5
+
+- 模拟体验升级：新增异步模拟任务接口（`/api/simulate/async`、`/api/simulate/jobs/{job_id}`、`/api/simulate/jobs/{job_id}/cancel`），支持进度查询与取消
+- 前端顶部模拟控件改为任务化执行：新增"正在模拟中"浮层、百分比进度与取消按钮，长时模拟可视化
+- 修复导入流程：导入文案统一为"导入数据"，修复刷新后再次导入卡在"导入中..."的问题
+- 修复"重置模拟"按钮无效：改为直接调用 `apiReset` 并刷新前端状态，增加成功/失败反馈
+- P3-Next（排班/请假）：新增班次级请假参数（早晚班计划请假率、早晚班病假率），接入人力产能计算与审计字段
+- P3-Next（预算/融资）：新增 `capex_cash_payment_ratio`（CAPEX 现金支付比例）、`rolling_budget_window_days`（滚动预算窗口）
+- P3-Next（融资成本归集）：支持 `finance_cost_allocation_method=revenue|credit_usage` 两种分摊方式，并跟踪门店融资占用
+- P3-Next（BI深化）：新增 `insights.productivity`（区域/业态/角色人效钻取 + 日趋势），前端新增筛选器与趋势窗口切换（7/14/30/60/90 天）
+- 账本增强：新增请假与融资归集字段（如 `workforce_leave_planned`、`workforce_leave_sick`、`finance_interest_allocated`、`finance_capex_financed`）
+
+## 0.7.4
+
+- 完成 P2 收口并启动 P3：
+  - 人力生命周期基础：编制/在岗/培训、日流失、招聘预算与提前期（pending hires）
+  - 总部融资基础：`hq_credit_limit`、`hq_daily_interest_rate`、`hq_auto_finance`、自动还款
+  - BI 预警基础：现金、授信占用、人手缺口，安全库存预警（`insights.alerts`）
+- 新增 API：`PUT /api/finance`
+- P3-next：新增班次排班参数（班次数/每班配置/加班班次），接入产能因子计算
+- P3-next：新增技能矩阵与业态分配（`skill_by_category` / `shift_allocation_by_category`），服务线产能按业态细分
+- P3-next：新增岗位技能/岗位班次分配（`skill_by_role` / `shift_allocation_by_role`），对 `labor_role` 服务线做精细产能修正
+- 审计增强：日流水新增 `workforce_breakdown_json`，记录人力产能分解快照
+- 预算扩展：`/api/finance` 支持月度预算目标，`finance.budget_mtd` 返回当月进度与 MTD 实际
+- 日流水增强：新增人力与补货/对冲相关审计字段
+- 门店批量模板升级为后端共享：支持保存/删除/重命名/JSON 导入导出（merge/replace）
+- 站点批量模板升级为后端共享：支持保存/删除/重命名/JSON 导入导出（merge/replace）
+- 前端新增"模板中心"弹窗：统一管理门店/站点模板，支持重命名与导入导出
+
+## 0.7.3
+
+- 完成 P2 中期能力：
+  - 事件对冲动作：应急供电 / 临时促销 / 加班扩容（`mitigation`）
+  - 自动补货：触发点 + 安全库存 + 目标库存 + 提前期（replenishment rules + pending inbounds）
+  - 选址可达性：`distance_mode=road_proxy|road_graph|euclidean`，`road_graph` 支持 `graph_k_neighbors`
+- 账本增强：新增 `mitigation_cost`、`mitigation_actions_json`、`replenishment_cost`、`replenishment_orders_json`、`inbound_arrivals_json`
+- API 增加：`POST /api/stores/{store_id}/replenishment/rules`、`DELETE /api/stores/{store_id}/replenishment/rules/{sku}`
+- 新增回归脚本：`tools/test_p2_midterm.py`（3 项）
+
+## 0.7.2
+
+- 完成 P1 策略能力：新增选址推荐 API（`/api/site-recommendations`）与前端策略实验页（`/strategy`）
+- 新增竞品分流参数：门店支持 `local_competition_intensity` 与 `attractiveness_index`，并接入订单计算
+- 新增场景对比 API（`/api/scenarios/compare`）：同初始状态并行仿真，返回 baseline 与场景 delta 指标
+- P2-1 进展：选址推荐支持 `distance_mode=road_proxy|euclidean`，默认 `road_proxy`
+- P2-2 进展：新增 `distance_mode=road_graph`（站点图最短路近似）与 `graph_k_neighbors` 参数，推荐结果增加 `distance_confidence` 与 `score_breakdown`
+
+## 0.7.1
+
 ## 0.7.5
 
 - 模拟体验升级：新增异步模拟任务接口（`/api/simulate/async`、`/api/simulate/jobs/{job_id}`、`/api/simulate/jobs/{job_id}/cancel`），支持进度查询与取消

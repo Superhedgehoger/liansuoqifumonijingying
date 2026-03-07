@@ -1004,6 +1004,62 @@ def _sample_turnover(headcount: int, rate: float, rng: random.Random) -> int:
     return out
 
 
+def _recent_store_productivity(state: GameState, store_id: str, window: int = 7) -> float:
+    if window <= 0:
+        return 0.0
+    values: list[float] = []
+    for dr in reversed(getattr(state, "ledger", []) or []):
+        for sr in getattr(dr, "store_results", []) or []:
+            if str(getattr(sr, "store_id", "") or "") != str(store_id):
+                continue
+            revenue = max(0.0, float(getattr(sr, "revenue", 0.0) or 0.0))
+            headcount = max(1.0, float(getattr(sr, "workforce_headcount_end", 0.0) or 0.0))
+            values.append(revenue / headcount)
+            break
+        if len(values) >= window:
+            break
+    if not values:
+        return 0.0
+    return float(sum(values) / float(len(values)))
+
+
+def _auto_tune_workforce(store: Store, productivity: float) -> None:
+    wf = getattr(store, "workforce", None)
+    if wf is None:
+        return
+
+    planned = max(1, int(getattr(wf, "planned_headcount", 1) or 1))
+    current = max(0, int(getattr(wf, "current_headcount", 0) or 0))
+    shifts = max(1, int(getattr(wf, "shifts_per_day", 2) or 1))
+    staffing = max(1, int(getattr(wf, "staffing_per_shift", 3) or 1))
+    target_cov = max(0.5, min(1.2, float(getattr(wf, "auto_target_coverage", 0.9) or 0.9)))
+
+    if bool(getattr(wf, "auto_schedule_enabled", False)):
+        target_required = max(1, int(round(float(current) / target_cov)))
+        desired_staffing = max(1, int(math.ceil(float(target_required) / float(shifts))))
+        if desired_staffing != staffing:
+            step = 1 if desired_staffing > staffing else -1
+            wf.staffing_per_shift = max(1, staffing + step)
+
+    if bool(getattr(wf, "auto_recruit_budget_enabled", False)):
+        shortage = max(0, planned - current)
+        lead = max(1, int(getattr(wf, "recruiting_lead_days", 7) or 1))
+        hire_rate = max(0.01, float(getattr(wf, "recruiting_hire_rate_per_100_budget", 0.20) or 0.01))
+        needed_hires_per_day = shortage / float(lead)
+        suggested = (needed_hires_per_day / hire_rate) * 100.0
+        floor = max(0.0, float(getattr(wf, "auto_productivity_floor", 250.0) or 0.0))
+        if productivity > floor * 1.2:
+            suggested *= 1.15
+        elif floor > 0 and productivity < floor * 0.8:
+            suggested *= 0.75
+
+        bmin = max(0.0, float(getattr(wf, "auto_recruit_budget_min", 0.0) or 0.0))
+        bmax = max(bmin, float(getattr(wf, "auto_recruit_budget_max", 5000.0) or 0.0))
+        suggested = max(bmin, min(bmax, suggested))
+        wf.recruiting_enabled = True if shortage > 0 else bool(getattr(wf, "recruiting_enabled", False))
+        wf.recruiting_daily_budget = float(round(suggested, 2))
+
+
 def _workforce_daily(store: Store, day: int, rng: random.Random) -> tuple[int, int, float, float, float, float, int, int, int, float]:
     wf = getattr(store, "workforce", None)
     if wf is None:
@@ -1115,36 +1171,112 @@ def _workforce_role_capacity_factors(store: Store) -> Dict[str, float]:
     return out
 
 
+def _sync_total_credit_fields(state: GameState) -> None:
+    short_used = max(0.0, float(getattr(state, "hq_short_credit_used", 0.0) or 0.0))
+    medium_used = max(0.0, float(getattr(state, "hq_medium_credit_used", 0.0) or 0.0))
+    short_limit = max(0.0, float(getattr(state, "hq_short_credit_limit", 0.0) or 0.0))
+    medium_limit = max(0.0, float(getattr(state, "hq_medium_credit_limit", 0.0) or 0.0))
+    legacy_limit = max(0.0, float(getattr(state, "hq_credit_limit", 0.0) or 0.0))
+
+    if short_limit <= 0 and medium_limit <= 0 and legacy_limit > 0:
+        ratio = max(0.0, min(1.0, float(getattr(state, "hq_credit_draw_mix_short_ratio", 0.7) or 0.0)))
+        short_limit = legacy_limit * ratio
+        medium_limit = max(0.0, legacy_limit - short_limit)
+        state.hq_short_credit_limit = short_limit
+        state.hq_medium_credit_limit = medium_limit
+
+    state.hq_credit_limit = float(short_limit + medium_limit)
+    state.hq_credit_used = float(short_used + medium_used)
+
+
+def _draw_credit(state: GameState, amount: float) -> tuple[float, float, float]:
+    amt = max(0.0, float(amount or 0.0))
+    if amt <= 0:
+        return 0.0, 0.0, 0.0
+    _sync_total_credit_fields(state)
+
+    ratio = max(0.0, min(1.0, float(getattr(state, "hq_credit_draw_mix_short_ratio", 0.7) or 0.0)))
+    short_limit = max(0.0, float(getattr(state, "hq_short_credit_limit", 0.0) or 0.0))
+    medium_limit = max(0.0, float(getattr(state, "hq_medium_credit_limit", 0.0) or 0.0))
+    short_used = max(0.0, float(getattr(state, "hq_short_credit_used", 0.0) or 0.0))
+    medium_used = max(0.0, float(getattr(state, "hq_medium_credit_used", 0.0) or 0.0))
+
+    short_room = max(0.0, short_limit - short_used)
+    medium_room = max(0.0, medium_limit - medium_used)
+
+    target_short = amt * ratio
+    draw_short = min(short_room, target_short)
+    remain = amt - draw_short
+    draw_medium = min(medium_room, max(0.0, remain))
+    remain2 = amt - draw_short - draw_medium
+
+    if remain2 > 0 and short_room > draw_short:
+        extra = min(remain2, short_room - draw_short)
+        draw_short += extra
+        remain2 -= extra
+    if remain2 > 0 and medium_room > draw_medium:
+        extra = min(remain2, medium_room - draw_medium)
+        draw_medium += extra
+
+    state.hq_short_credit_used = short_used + draw_short
+    state.hq_medium_credit_used = medium_used + draw_medium
+    _sync_total_credit_fields(state)
+    return float(draw_short + draw_medium), float(draw_short), float(draw_medium)
+
+
+def _repay_credit(state: GameState, amount: float) -> float:
+    amt = max(0.0, float(amount or 0.0))
+    if amt <= 0:
+        return 0.0
+    _sync_total_credit_fields(state)
+
+    short_used = max(0.0, float(getattr(state, "hq_short_credit_used", 0.0) or 0.0))
+    medium_used = max(0.0, float(getattr(state, "hq_medium_credit_used", 0.0) or 0.0))
+
+    repay_short = min(short_used, amt)
+    left = amt - repay_short
+    repay_medium = min(medium_used, left)
+
+    state.hq_short_credit_used = short_used - repay_short
+    state.hq_medium_credit_used = medium_used - repay_medium
+    _sync_total_credit_fields(state)
+    return float(repay_short + repay_medium)
+
+
 def _apply_hq_finance(state: GameState, day_result: DayResult) -> None:
-    used = max(0.0, float(getattr(state, "hq_credit_used", 0.0) or 0.0))
-    rate = max(0.0, float(getattr(state, "hq_daily_interest_rate", 0.0) or 0.0))
-    if used > 0 and rate > 0:
-        interest = used * rate
+    _sync_total_credit_fields(state)
+    short_used = max(0.0, float(getattr(state, "hq_short_credit_used", 0.0) or 0.0))
+    medium_used = max(0.0, float(getattr(state, "hq_medium_credit_used", 0.0) or 0.0))
+    short_rate = max(0.0, float(getattr(state, "hq_short_daily_interest_rate", 0.0008) or 0.0))
+    medium_rate = max(0.0, float(getattr(state, "hq_medium_daily_interest_rate", 0.0004) or 0.0))
+    legacy_rate = max(0.0, float(getattr(state, "hq_daily_interest_rate", 0.0) or 0.0))
+
+    interest = short_used * short_rate + medium_used * medium_rate
+    if interest <= 0 and (short_used + medium_used) > 0 and legacy_rate > 0:
+        interest = (short_used + medium_used) * legacy_rate
+    if interest > 0:
         state.cash -= interest
         day_result.finance_interest_cost = float(interest)
         day_result.total_net_cashflow -= float(interest)
 
     if bool(getattr(state, "hq_auto_finance", False)):
-        limit = max(0.0, float(getattr(state, "hq_credit_limit", 0.0) or 0.0))
-        used = max(0.0, float(getattr(state, "hq_credit_used", 0.0) or 0.0))
-        room = max(0.0, limit - used)
-        if state.cash < 0 and room > 0:
-            draw = min(room, -float(state.cash))
-            state.cash += draw
-            state.hq_credit_used = used + draw
-            day_result.finance_credit_draw = float(draw)
+        if state.cash < 0:
+            draw, _, _ = _draw_credit(state, -float(state.cash))
+            if draw > 0:
+                state.cash += draw
+                day_result.finance_credit_draw = float(draw)
 
         used = max(0.0, float(getattr(state, "hq_credit_used", 0.0) or 0.0))
         if state.cash > 0 and used > 0:
-            repay = min(used, float(state.cash) * 0.30)
-            if repay > 0:
-                state.cash -= repay
-                state.hq_credit_used = used - repay
-                day_result.finance_credit_repay = float(repay)
+            repay_req = min(used, float(state.cash) * 0.30)
+            repay_actual = _repay_credit(state, repay_req)
+            if repay_actual > 0:
+                state.cash -= repay_actual
+                day_result.finance_credit_repay = float(repay_actual)
                 store_used = {sid: max(0.0, float(getattr(st, "finance_credit_used", 0.0) or 0.0)) for sid, st in state.stores.items()}
                 total_store_used = sum(store_used.values())
                 if total_store_used > 0:
-                    left = float(repay)
+                    left = float(repay_actual)
                     keys = list(store_used.keys())
                     for idx, sid in enumerate(keys):
                         st = state.stores[sid]
@@ -1157,7 +1289,7 @@ def _apply_hq_finance(state: GameState, day_result: DayResult) -> None:
                             deduct = min(
                                 left,
                                 float(getattr(st, "finance_credit_used", 0.0) or 0.0),
-                                repay * (used_i / total_store_used),
+                                repay_actual * (used_i / total_store_used),
                             )
                         if deduct > 0:
                             st.finance_credit_used = max(0.0, float(st.finance_credit_used) - deduct)
@@ -1230,12 +1362,8 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
                 sr.cash_out += cash_part
                 store.cash_balance -= cash_part
                 if financed_part > 0:
-                    limit = max(0.0, float(getattr(state, "hq_credit_limit", 0.0) or 0.0))
-                    used = max(0.0, float(getattr(state, "hq_credit_used", 0.0) or 0.0))
-                    room = max(0.0, limit - used)
-                    draw = min(room, financed_part)
+                    draw, _, _ = _draw_credit(state, financed_part)
                     if draw > 0:
-                        state.hq_credit_used = used + draw
                         store.finance_credit_used = max(0.0, float(getattr(store, "finance_credit_used", 0.0) or 0.0)) + float(draw)
                         sr.finance_capex_financed += float(draw)
                     remain = max(0.0, financed_part - draw)
@@ -1290,6 +1418,7 @@ def simulate_day(state: GameState, cfg: EngineConfig) -> DayResult:
 
         # Workforce lifecycle (P3)
         wf = getattr(store, "workforce", None)
+        _auto_tune_workforce(store, _recent_store_productivity(state, store.store_id, window=7))
         sr.workforce_headcount_start = int(getattr(wf, "current_headcount", 0) or 0) if wf else 0
         wf_daily = _workforce_daily(store, state.day, rng)
         sr.workforce_lost = int(wf_daily[0])

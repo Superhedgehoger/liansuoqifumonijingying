@@ -266,6 +266,12 @@ class WorkforceConfig:
     planned_leave_rate_night: float = 0.0
     sick_leave_rate_day: float = 0.0
     sick_leave_rate_night: float = 0.0
+    auto_schedule_enabled: bool = False
+    auto_recruit_budget_enabled: bool = False
+    auto_target_coverage: float = 0.9
+    auto_productivity_floor: float = 250.0
+    auto_recruit_budget_min: float = 0.0
+    auto_recruit_budget_max: float = 5000.0
 
     # P3-next: shift scheduling
     shifts_per_day: int = 2
@@ -573,6 +579,13 @@ class GameState:
     hq_credit_limit: float = 0.0
     hq_credit_used: float = 0.0
     hq_daily_interest_rate: float = 0.0005
+    hq_short_credit_limit: float = 0.0
+    hq_short_credit_used: float = 0.0
+    hq_short_daily_interest_rate: float = 0.0008
+    hq_medium_credit_limit: float = 0.0
+    hq_medium_credit_used: float = 0.0
+    hq_medium_daily_interest_rate: float = 0.0004
+    hq_credit_draw_mix_short_ratio: float = 0.7
     hq_auto_finance: bool = False
     budget_monthly_revenue_target: float = 0.0
     budget_monthly_profit_target: float = 0.0
@@ -584,6 +597,8 @@ class GameState:
     # Shared UI templates
     store_bulk_templates: List[StoreBulkTemplate] = field(default_factory=list)
     station_bulk_templates: List[StationBulkTemplate] = field(default_factory=list)
+    bi_action_templates: List[dict] = field(default_factory=list)
+    bi_action_checkpoints: List[dict] = field(default_factory=list)
 
     def month_day_index(self, month_len: int) -> int:
         # 1..month_len

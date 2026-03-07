@@ -72,6 +72,12 @@ export interface Store {
     planned_leave_rate_night?: number;
     sick_leave_rate_day?: number;
     sick_leave_rate_night?: number;
+    auto_schedule_enabled?: boolean;
+    auto_recruit_budget_enabled?: boolean;
+    auto_target_coverage?: number;
+    auto_productivity_floor?: number;
+    auto_recruit_budget_min?: number;
+    auto_recruit_budget_max?: number;
     shifts_per_day?: number;
     staffing_per_shift?: number;
     shift_hours?: number;
@@ -224,6 +230,13 @@ export interface SimulationState {
     hq_credit_limit: number;
     hq_credit_used: number;
     hq_daily_interest_rate: number;
+    hq_short_credit_limit?: number;
+    hq_short_credit_used?: number;
+    hq_short_daily_interest_rate?: number;
+    hq_medium_credit_limit?: number;
+    hq_medium_credit_used?: number;
+    hq_medium_daily_interest_rate?: number;
+    hq_credit_draw_mix_short_ratio?: number;
     hq_auto_finance: boolean;
     budget_monthly_revenue_target?: number;
     budget_monthly_profit_target?: number;
@@ -265,10 +278,26 @@ export interface SimulationState {
       by_role?: Array<{ role: string; revenue: number; headcount: number; revenue_per_headcount: number }>;
       trend_daily?: Array<{ day: number; revenue: number; profit: number; cashflow: number; orders: number; revenue_per_headcount: number }>;
     };
+    workforce_recommendations?: Array<{
+      store_id: string;
+      store_name: string;
+      current_headcount: number;
+      planned_headcount: number;
+      required_headcount: number;
+      gap: number;
+      avg_revenue_per_headcount_7d: number;
+      suggested: { shifts_per_day: number; staffing_per_shift: number; recruiting_daily_budget: number };
+      automation: { auto_schedule_enabled: boolean; auto_recruit_budget_enabled: boolean };
+      reason: string;
+    }>;
   };
   bulk_templates?: {
     store_ops: Array<{ name: string; status: 'planning' | 'constructing' | 'open' | 'closed'; inv: number; asset: number }>;
     station_ops: Array<{ name: string; fuel_factor: number; visitor_factor: number }>;
+  };
+  bi_actions?: {
+    templates: BiActionTemplate[];
+    checkpoints: BiActionCheckpoint[];
   };
   stations: Station[];
   stores: Store[];
@@ -385,4 +414,85 @@ export interface ScenarioCompareResult {
       avg_daily_orders: number;
     };
   }>;
+}
+
+export interface FinanceScenarioMetrics {
+  days: number;
+  end_day: number;
+  end_cash: number;
+  total_finance_interest: number;
+  total_credit_draw: number;
+  total_credit_repay: number;
+  total_net_cashflow: number;
+  end_credit_used: number;
+  end_short_credit_used: number;
+  end_medium_credit_used: number;
+}
+
+export interface FinanceScenarioCompareResult {
+  days: number;
+  seed?: number;
+  baseline: FinanceScenarioMetrics;
+  scenarios: Array<{
+    name: string;
+    metrics: FinanceScenarioMetrics;
+    delta_vs_baseline: {
+      total_finance_interest: number;
+      total_net_cashflow: number;
+      end_cash: number;
+    };
+  }>;
+}
+
+export interface BiDecisionAction {
+  action_id: string;
+  action_type: string;
+  name: string;
+  priority?: string;
+  reason?: string;
+  store_id?: string;
+  store_patch?: Record<string, any>;
+  finance_patch?: Record<string, any>;
+}
+
+export interface BiActionSuggestResult {
+  day: number;
+  actions: BiDecisionAction[];
+}
+
+export interface BiActionBacktestResult {
+  days: number;
+  seed?: number;
+  baseline: ScenarioMetrics;
+  scenario: ScenarioMetrics & { total_finance_interest?: number };
+  delta_vs_baseline: {
+    total_revenue: number;
+    total_operating_profit: number;
+    total_net_cashflow: number;
+    avg_daily_orders: number;
+    end_cash: number;
+  };
+}
+
+export interface BiActionTemplate {
+  name: string;
+  description?: string;
+  actions: BiDecisionAction[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface BiActionCheckpoint {
+  checkpoint_id: string;
+  name?: string;
+  reason?: string;
+  day: number;
+  created_at?: string;
+  action_count?: number;
+}
+
+export interface BiRollbackPreviewResult {
+  current: { day: number; cash: number; hq_credit_used: number; store_count: number; total_headcount: number };
+  target: { day: number; cash: number; hq_credit_used: number; store_count: number; total_headcount: number };
+  delta: { day: number; cash: number; hq_credit_used: number; store_count: number; total_headcount: number };
 }

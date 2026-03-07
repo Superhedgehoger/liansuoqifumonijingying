@@ -400,3 +400,39 @@ export function apiCompareScenarios(payload: {
     body: JSON.stringify(payload),
   });
 }
+
+export type BiActionTemplate = {
+  name: string;
+  description: string;
+  actions: any[];
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type RollbackPreviewResult = {
+  current: { day: number; cash: number; hq_credit_used: number; store_count: number; total_headcount: number };
+  target: { day: number; cash: number; hq_credit_used: number; store_count: number; total_headcount: number };
+  delta: { day: number; cash: number; hq_credit_used: number; store_count: number; total_headcount: number };
+};
+
+export function apiUpsertBiActionTemplate(template: BiActionTemplate): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/bi/action-templates', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(template)
+  });
+}
+
+export function apiDeleteBiActionTemplate(name: string): Promise<SimulationState> {
+  return requestJson<SimulationState>(`/api/bi/action-templates/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });
+}
+
+export function apiPreviewRollbackBiActions(checkpointId?: string): Promise<RollbackPreviewResult> {
+  return requestJson<RollbackPreviewResult>('/api/bi/actions/rollback/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ checkpoint_id: checkpointId || '' })
+  });
+}

@@ -10,6 +10,7 @@ import json
 import math
 import uuid
 from datetime import datetime, timezone
+from dataclasses import asdict
 
 from fastapi import Body, FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -755,6 +756,24 @@ def create_app() -> FastAPI:
                 "sick_leave_rate_night": float(
                     getattr(getattr(st, "workforce", None), "sick_leave_rate_night", 0.0) or 0.0
                 ),
+                "auto_schedule_enabled": bool(
+                    getattr(getattr(st, "workforce", None), "auto_schedule_enabled", False)
+                ),
+                "auto_recruit_budget_enabled": bool(
+                    getattr(getattr(st, "workforce", None), "auto_recruit_budget_enabled", False)
+                ),
+                "auto_target_coverage": float(
+                    getattr(getattr(st, "workforce", None), "auto_target_coverage", 0.9) or 0.0
+                ),
+                "auto_productivity_floor": float(
+                    getattr(getattr(st, "workforce", None), "auto_productivity_floor", 250.0) or 0.0
+                ),
+                "auto_recruit_budget_min": float(
+                    getattr(getattr(st, "workforce", None), "auto_recruit_budget_min", 0.0) or 0.0
+                ),
+                "auto_recruit_budget_max": float(
+                    getattr(getattr(st, "workforce", None), "auto_recruit_budget_max", 5000.0) or 0.0
+                ),
                 "shifts_per_day": int(getattr(getattr(st, "workforce", None), "shifts_per_day", 2) or 0),
                 "staffing_per_shift": int(getattr(getattr(st, "workforce", None), "staffing_per_shift", 3) or 0),
                 "shift_hours": float(getattr(getattr(st, "workforce", None), "shift_hours", 8.0) or 0.0),
@@ -1238,6 +1257,332 @@ def create_app() -> FastAPI:
             "open_store_count": int(sum(1 for x in st.stores.values() if str(getattr(x, "status", "")) == "open")),
         }
 
+    def _apply_finance_patch(state: GameState, patch: dict) -> None:
+        if not isinstance(patch, dict):
+            return
+        if "hq_short_credit_limit" in patch:
+            state.hq_short_credit_limit = max(0.0, float(patch.get("hq_short_credit_limit") or 0.0))
+        if "hq_medium_credit_limit" in patch:
+            state.hq_medium_credit_limit = max(0.0, float(patch.get("hq_medium_credit_limit") or 0.0))
+        if "hq_short_daily_interest_rate" in patch:
+            state.hq_short_daily_interest_rate = max(0.0, float(patch.get("hq_short_daily_interest_rate") or 0.0))
+        if "hq_medium_daily_interest_rate" in patch:
+            state.hq_medium_daily_interest_rate = max(0.0, float(patch.get("hq_medium_daily_interest_rate") or 0.0))
+        if "hq_credit_draw_mix_short_ratio" in patch:
+            state.hq_credit_draw_mix_short_ratio = max(
+                0.0, min(1.0, float(patch.get("hq_credit_draw_mix_short_ratio") or 0.0))
+            )
+
+    def _simulate_finance_scenario_metrics(base_state: GameState, days: int, seed: int | None, scenario: dict | None = None) -> dict:
+        st = copy.deepcopy(base_state)
+        if seed is not None:
+            st.rng_seed = int(seed)
+            st.rng_state = None
+
+        scenario = scenario or {}
+        _apply_finance_patch(st, scenario.get("finance_patch") or {})
+
+        total_interest = 0.0
+        total_draw = 0.0
+        total_repay = 0.0
+        total_cashflow = 0.0
+        for _ in range(max(1, int(days))):
+            dr = simulate_day(st, cfg)
+            total_interest += float(getattr(dr, "finance_interest_cost", 0.0) or 0.0)
+            total_draw += float(getattr(dr, "finance_credit_draw", 0.0) or 0.0)
+            total_repay += float(getattr(dr, "finance_credit_repay", 0.0) or 0.0)
+            total_cashflow += float(getattr(dr, "total_net_cashflow", 0.0) or 0.0)
+
+        return {
+            "days": int(days),
+            "end_day": int(st.day),
+            "end_cash": float(round(st.cash, 4)),
+            "total_finance_interest": float(round(total_interest, 4)),
+            "total_credit_draw": float(round(total_draw, 4)),
+            "total_credit_repay": float(round(total_repay, 4)),
+            "total_net_cashflow": float(round(total_cashflow, 4)),
+            "end_credit_used": float(round(getattr(st, "hq_credit_used", 0.0) or 0.0, 4)),
+            "end_short_credit_used": float(round(getattr(st, "hq_short_credit_used", 0.0) or 0.0, 4)),
+            "end_medium_credit_used": float(round(getattr(st, "hq_medium_credit_used", 0.0) or 0.0, 4)),
+        }
+
+    def _coerce_workforce_patch(payload: dict) -> dict:
+        out: dict = {}
+        if not isinstance(payload, dict):
+            return out
+        num_fields = [
+            "planned_headcount",
+            "current_headcount",
+            "training_level",
+            "daily_turnover_rate",
+            "recruiting_daily_budget",
+            "recruiting_lead_days",
+            "recruiting_hire_rate_per_100_budget",
+            "shifts_per_day",
+            "staffing_per_shift",
+            "shift_hours",
+            "overtime_shift_extra_capacity",
+            "overtime_shift_daily_cost",
+            "planned_leave_rate",
+            "unplanned_absence_rate",
+            "planned_leave_rate_day",
+            "planned_leave_rate_night",
+            "sick_leave_rate_day",
+            "sick_leave_rate_night",
+            "auto_target_coverage",
+            "auto_productivity_floor",
+            "auto_recruit_budget_min",
+            "auto_recruit_budget_max",
+        ]
+        bool_fields = [
+            "recruiting_enabled",
+            "overtime_shift_enabled",
+            "auto_schedule_enabled",
+            "auto_recruit_budget_enabled",
+        ]
+        dict_fields = [
+            "skill_by_category",
+            "shift_allocation_by_category",
+            "skill_by_role",
+            "shift_allocation_by_role",
+        ]
+        for k in num_fields:
+            if k in payload:
+                out[k] = payload.get(k)
+        for k in bool_fields:
+            if k in payload:
+                out[k] = bool(payload.get(k))
+        for k in dict_fields:
+            if isinstance(payload.get(k), dict):
+                out[k] = payload.get(k)
+        return out
+
+    def _apply_bi_action_to_state(state: GameState, action: dict) -> None:
+        if not isinstance(action, dict):
+            return
+        store_id = str(action.get("store_id") or "").strip()
+        if store_id:
+            st = state.stores.get(store_id)
+            if st is not None:
+                sp_raw = action.get("store_patch")
+                sp: dict = dict(sp_raw) if isinstance(sp_raw, dict) else {}
+                if sp.get("traffic_conversion_rate") is not None:
+                    st.traffic_conversion_rate = max(0.0, float(sp.get("traffic_conversion_rate") or 0.0))
+                if sp.get("local_competition_intensity") is not None:
+                    st.local_competition_intensity = max(
+                        0.0, min(1.0, float(sp.get("local_competition_intensity") or 0.0))
+                    )
+                if sp.get("attractiveness_index") is not None:
+                    st.attractiveness_index = max(0.5, min(1.5, float(sp.get("attractiveness_index") or 1.0)))
+                if isinstance(sp.get("mitigation"), dict):
+                    m = dict(sp.get("mitigation") or {})
+                    mit = getattr(st, "mitigation", None)
+                    if mit is not None:
+                        if m.get("use_overtime_capacity") is not None:
+                            mit.use_overtime_capacity = bool(m.get("use_overtime_capacity"))
+                        if m.get("overtime_capacity_boost") is not None:
+                            mit.overtime_capacity_boost = max(0.0, float(m.get("overtime_capacity_boost") or 0.0))
+                        if m.get("overtime_daily_cost") is not None:
+                            mit.overtime_daily_cost = max(0.0, float(m.get("overtime_daily_cost") or 0.0))
+                if isinstance(sp.get("workforce"), dict):
+                    wf_patch = _coerce_workforce_patch(sp.get("workforce") or {})
+                    wf = getattr(st, "workforce", None)
+                    if wf is not None:
+                        for k, v in wf_patch.items():
+                            setattr(wf, k, v)
+
+        fp_raw = action.get("finance_patch")
+        fp: dict = dict(fp_raw) if isinstance(fp_raw, dict) else {}
+        if fp.get("hq_short_daily_interest_rate") is not None:
+            state.hq_short_daily_interest_rate = max(0.0, float(fp.get("hq_short_daily_interest_rate") or 0.0))
+        if fp.get("hq_medium_daily_interest_rate") is not None:
+            state.hq_medium_daily_interest_rate = max(0.0, float(fp.get("hq_medium_daily_interest_rate") or 0.0))
+        if fp.get("hq_credit_draw_mix_short_ratio") is not None:
+            state.hq_credit_draw_mix_short_ratio = max(0.0, min(1.0, float(fp.get("hq_credit_draw_mix_short_ratio") or 0.0)))
+        if fp.get("hq_short_credit_limit") is not None:
+            state.hq_short_credit_limit = max(0.0, float(fp.get("hq_short_credit_limit") or 0.0))
+        if fp.get("hq_medium_credit_limit") is not None:
+            state.hq_medium_credit_limit = max(0.0, float(fp.get("hq_medium_credit_limit") or 0.0))
+
+    def _generate_bi_actions(state: GameState, limit: int = 20) -> list[dict]:
+        dto = _state_to_dto(state)
+        recs = ((dto.get("insights") or {}).get("workforce_recommendations") or []) if isinstance(dto, dict) else []
+        actions: list[dict] = []
+
+        for r in recs[: max(1, min(200, int(limit) * 2))]:
+            if not isinstance(r, dict):
+                continue
+            sid = str(r.get("store_id") or "").strip()
+            if not sid:
+                continue
+            sug_raw = r.get("suggested")
+            suggested: dict = dict(sug_raw) if isinstance(sug_raw, dict) else {}
+            staffing = int(suggested.get("staffing_per_shift") or 1)
+            budget = float(suggested.get("recruiting_daily_budget") or 0.0)
+            actions.append(
+                {
+                    "action_id": f"wf_{sid}",
+                    "action_type": "store_workforce_optimization",
+                    "name": f"{sid} 自动调班与招聘建议",
+                    "store_id": sid,
+                    "priority": "high" if int(r.get("gap") or 0) > 0 else "medium",
+                    "reason": str(r.get("reason") or ""),
+                    "store_patch": {
+                        "workforce": {
+                            "auto_schedule_enabled": True,
+                            "auto_recruit_budget_enabled": True,
+                            "staffing_per_shift": max(1, staffing),
+                            "recruiting_daily_budget": max(0.0, budget),
+                        }
+                    },
+                }
+            )
+
+        alerts = ((dto.get("insights") or {}).get("alerts") or []) if isinstance(dto, dict) else []
+        if any(str(a.get("code") or "") == "cash_negative" for a in alerts if isinstance(a, dict)):
+            actions.append(
+                {
+                    "action_id": "fin_mix_balance",
+                    "action_type": "finance_structure_tune",
+                    "name": "融资结构调优（偏中贷降低成本）",
+                    "priority": "high",
+                    "reason": "现金为负，建议降低短贷占比并下调利率情景",
+                    "finance_patch": {
+                        "hq_credit_draw_mix_short_ratio": 0.5,
+                        "hq_short_daily_interest_rate": max(0.0, float(getattr(state, "hq_short_daily_interest_rate", 0.0008) or 0.0) * 0.95),
+                        "hq_medium_daily_interest_rate": max(0.0, float(getattr(state, "hq_medium_daily_interest_rate", 0.0004) or 0.0) * 0.98),
+                    },
+                }
+            )
+
+        return actions[: max(1, min(200, int(limit)))]
+
+    def _backtest_bi_actions(base_state: GameState, days: int, seed: int | None, actions: list[dict]) -> dict:
+        baseline = _simulate_scenario_metrics(base_state, days=days, seed=seed, scenario={})
+        st = copy.deepcopy(base_state)
+        for a in actions:
+            _apply_bi_action_to_state(st, a)
+
+        total_revenue = 0.0
+        total_profit = 0.0
+        total_cashflow = 0.0
+        total_orders = 0
+        total_interest = 0.0
+        for _ in range(max(1, int(days))):
+            dr = simulate_day(st, cfg)
+            total_revenue += float(getattr(dr, "total_revenue", 0.0) or 0.0)
+            total_profit += float(getattr(dr, "total_operating_profit", 0.0) or 0.0)
+            total_cashflow += float(getattr(dr, "total_net_cashflow", 0.0) or 0.0)
+            total_interest += float(getattr(dr, "finance_interest_cost", 0.0) or 0.0)
+            for sr in getattr(dr, "store_results", []) or []:
+                total_orders += int(sum((getattr(sr, "orders_by_service", {}) or {}).values()))
+
+        scenario = {
+            "days": int(days),
+            "end_day": int(st.day),
+            "end_cash": float(round(st.cash, 4)),
+            "total_revenue": float(round(total_revenue, 4)),
+            "total_operating_profit": float(round(total_profit, 4)),
+            "total_net_cashflow": float(round(total_cashflow, 4)),
+            "avg_daily_orders": float(round(total_orders / float(max(1, int(days))), 4)),
+            "open_store_count": int(sum(1 for x in st.stores.values() if str(getattr(x, "status", "")) == "open")),
+            "total_finance_interest": float(round(total_interest, 4)),
+        }
+        delta = {
+            "total_revenue": float(round(float(scenario.get("total_revenue", 0.0)) - float(baseline.get("total_revenue", 0.0)), 4)),
+            "total_operating_profit": float(
+                round(float(scenario.get("total_operating_profit", 0.0)) - float(baseline.get("total_operating_profit", 0.0)), 4)
+            ),
+            "total_net_cashflow": float(round(float(scenario.get("total_net_cashflow", 0.0)) - float(baseline.get("total_net_cashflow", 0.0)), 4)),
+            "avg_daily_orders": float(round(float(scenario.get("avg_daily_orders", 0.0)) - float(baseline.get("avg_daily_orders", 0.0)), 4)),
+            "end_cash": float(round(float(scenario.get("end_cash", 0.0)) - float(baseline.get("end_cash", 0.0)), 4)),
+        }
+        return {"baseline": baseline, "scenario": scenario, "delta_vs_baseline": delta}
+
+    def _sanitize_bi_action(a: dict) -> dict:
+        out: dict = {}
+        if not isinstance(a, dict):
+            return out
+        for key in ("action_id", "action_type", "name", "priority", "reason", "store_id"):
+            if key in a:
+                out[key] = str(a.get(key) or "").strip()
+        if isinstance(a.get("store_patch"), dict):
+            out["store_patch"] = dict(a.get("store_patch") or {})
+        if isinstance(a.get("finance_patch"), dict):
+            out["finance_patch"] = dict(a.get("finance_patch") or {})
+        return out
+
+    def _sanitize_bi_actions(actions: list) -> list[dict]:
+        if not isinstance(actions, list):
+            return []
+        out: list[dict] = []
+        for a in actions:
+            if not isinstance(a, dict):
+                continue
+            x = _sanitize_bi_action(a)
+            if x:
+                out.append(x)
+        return out[:200]
+
+    def _state_payload_for_checkpoint(state: GameState) -> dict:
+        payload = {
+            "version": "0.7.3",
+            "state": asdict(state),
+        }
+        st = payload.get("state")
+        if isinstance(st, dict):
+            st["bi_action_checkpoints"] = []
+        return payload
+
+    def _append_bi_checkpoint(state: GameState, reason: str, actions: list[dict], name: str = "") -> dict:
+        checkpoints = list(getattr(state, "bi_action_checkpoints", []) or [])
+        cp = {
+            "checkpoint_id": f"bick_{uuid.uuid4().hex[:10]}",
+            "name": str(name or "").strip(),
+            "reason": str(reason or "").strip(),
+            "day": int(getattr(state, "day", 1) or 1),
+            "created_at": _now_iso(),
+            "actions": _sanitize_bi_actions(actions),
+            "payload": _state_payload_for_checkpoint(state),
+        }
+        checkpoints.insert(0, cp)
+        state.bi_action_checkpoints = checkpoints[:100]
+        return cp
+
+    def _restore_state_from_checkpoint_payload(payload: dict) -> GameState:
+        if not isinstance(payload, dict):
+            raise ValueError("invalid checkpoint payload")
+        st = payload.get("state")
+        if not isinstance(st, dict):
+            raise ValueError("checkpoint payload missing state")
+        p = state_path()
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return load_state(p)
+
+
+    def _compare_states_for_rollback(current: GameState, target: GameState) -> dict:
+        def _get_metrics(st: GameState) -> dict:
+            return {
+                "day": int(st.day),
+                "cash": float(st.cash),
+                "hq_credit_used": float(getattr(st, "hq_credit_used", 0.0) or 0.0),
+                "store_count": int(sum(1 for s in st.stores.values() if str(getattr(s, "status", "")) == "open")),
+                "total_headcount": int(sum(int(getattr(getattr(s, "workforce", None), "current_headcount", 0) or 0) for s in st.stores.values())),
+            }
+        
+        m_curr = _get_metrics(current)
+        m_tgt = _get_metrics(target)
+        
+        delta = {}
+        for k in m_curr:
+            delta[k] = float(round(m_tgt[k] - m_curr[k], 4))
+            
+        return {
+            "current": m_curr,
+            "target": m_tgt,
+            "delta": delta
+        }
+
     # -------------------- JSON API (for the React frontend) --------------------
 
     def _state_to_dto(state: GameState) -> dict:
@@ -1253,6 +1598,16 @@ def create_app() -> FastAPI:
         for r in rows:
             try:
                 d = int(r.get("day") or 0)
+            except Exception:
+                continue
+            if d < month_start or d > min(int(state.day), month_end):
+                continue
+            try:
+                mtd_revenue += float(r.get("revenue") or 0.0)
+                mtd_profit += float(r.get("operating_profit") or 0.0)
+                mtd_cashflow += float(r.get("net_cashflow") or 0.0)
+                mtd_finance_interest += float(r.get("finance_interest_allocated") or 0.0)
+                mtd_financed_capex += float(r.get("finance_capex_financed") or 0.0)
             except Exception:
                 continue
 
@@ -1499,13 +1854,103 @@ def create_app() -> FastAPI:
                             }
                         )
 
+        def _store_avg_productivity(store_id: str, days: int = 7) -> float:
+            out = []
+            for rr in reversed(rows):
+                if str(rr.get("store_id") or "") != str(store_id):
+                    continue
+                try:
+                    rev = float(rr.get("revenue") or 0.0)
+                    hc = max(1.0, float(rr.get("workforce_headcount_end") or 0.0))
+                except Exception:
+                    continue
+                out.append(rev / hc)
+                if len(out) >= days:
+                    break
+            if not out:
+                return 0.0
+            return float(sum(out) / float(len(out)))
+
+        workforce_recommendations = []
+        for st in state.stores.values():
+            wf = getattr(st, "workforce", None)
+            if wf is None:
+                continue
+            current = max(0, int(getattr(wf, "current_headcount", 0) or 0))
+            planned = max(1, int(getattr(wf, "planned_headcount", 1) or 1))
+            shifts = max(1, int(getattr(wf, "shifts_per_day", 2) or 1))
+            staffing = max(1, int(getattr(wf, "staffing_per_shift", 3) or 1))
+            required = shifts * staffing
+            gap = required - current
+            target_cov = max(0.5, min(1.2, float(getattr(wf, "auto_target_coverage", 0.9) or 0.9)))
+            target_required = max(1, int(round(float(current) / target_cov)))
+            suggested_staffing = max(1, int(math.ceil(float(target_required) / float(shifts))))
+            shortage = max(0, planned - current)
+            lead = max(1, int(getattr(wf, "recruiting_lead_days", 7) or 1))
+            hire_rate = max(0.01, float(getattr(wf, "recruiting_hire_rate_per_100_budget", 0.20) or 0.01))
+            suggested_budget = (shortage / float(lead) / hire_rate) * 100.0
+            p = _store_avg_productivity(st.store_id, days=7)
+            floor = max(0.0, float(getattr(wf, "auto_productivity_floor", 250.0) or 0.0))
+            if p > floor * 1.2:
+                suggested_budget *= 1.15
+            elif floor > 0 and p < floor * 0.8:
+                suggested_budget *= 0.75
+            bmin = max(0.0, float(getattr(wf, "auto_recruit_budget_min", 0.0) or 0.0))
+            bmax = max(bmin, float(getattr(wf, "auto_recruit_budget_max", 5000.0) or 0.0))
+            suggested_budget = max(bmin, min(bmax, suggested_budget))
+
+            reasons = []
+            if gap > 0:
+                reasons.append(f"排班缺口 {gap} 人")
+            if shortage > 0:
+                reasons.append(f"编制缺口 {shortage} 人")
+            if p > 0:
+                reasons.append(f"近7天人效 {p:.1f}")
+            if not reasons:
+                reasons.append("当前编制与排班较平衡")
+
+            workforce_recommendations.append(
+                {
+                    "store_id": str(st.store_id),
+                    "store_name": str(getattr(st, "name", st.store_id)),
+                    "current_headcount": int(current),
+                    "planned_headcount": int(planned),
+                    "required_headcount": int(required),
+                    "gap": int(gap),
+                    "avg_revenue_per_headcount_7d": float(round(p, 4)),
+                    "suggested": {
+                        "shifts_per_day": int(shifts),
+                        "staffing_per_shift": int(suggested_staffing),
+                        "recruiting_daily_budget": float(round(suggested_budget, 2)),
+                    },
+                    "automation": {
+                        "auto_schedule_enabled": bool(getattr(wf, "auto_schedule_enabled", False)),
+                        "auto_recruit_budget_enabled": bool(getattr(wf, "auto_recruit_budget_enabled", False)),
+                    },
+                    "reason": "；".join(reasons),
+                }
+            )
+
         return {
             "day": state.day,
             "cash": state.cash,
             "finance": {
-                "hq_credit_limit": float(getattr(state, "hq_credit_limit", 0.0) or 0.0),
-                "hq_credit_used": float(getattr(state, "hq_credit_used", 0.0) or 0.0),
+                "hq_credit_limit": float(
+                    (float(getattr(state, "hq_short_credit_limit", 0.0) or 0.0) + float(getattr(state, "hq_medium_credit_limit", 0.0) or 0.0))
+                    or float(getattr(state, "hq_credit_limit", 0.0) or 0.0)
+                ),
+                "hq_credit_used": float(
+                    (float(getattr(state, "hq_short_credit_used", 0.0) or 0.0) + float(getattr(state, "hq_medium_credit_used", 0.0) or 0.0))
+                    or float(getattr(state, "hq_credit_used", 0.0) or 0.0)
+                ),
                 "hq_daily_interest_rate": float(getattr(state, "hq_daily_interest_rate", 0.0005) or 0.0),
+                "hq_short_credit_limit": float(getattr(state, "hq_short_credit_limit", 0.0) or 0.0),
+                "hq_short_credit_used": float(getattr(state, "hq_short_credit_used", 0.0) or 0.0),
+                "hq_short_daily_interest_rate": float(getattr(state, "hq_short_daily_interest_rate", 0.0008) or 0.0),
+                "hq_medium_credit_limit": float(getattr(state, "hq_medium_credit_limit", 0.0) or 0.0),
+                "hq_medium_credit_used": float(getattr(state, "hq_medium_credit_used", 0.0) or 0.0),
+                "hq_medium_daily_interest_rate": float(getattr(state, "hq_medium_daily_interest_rate", 0.0004) or 0.0),
+                "hq_credit_draw_mix_short_ratio": float(getattr(state, "hq_credit_draw_mix_short_ratio", 0.7) or 0.0),
                 "hq_auto_finance": bool(getattr(state, "hq_auto_finance", False)),
                 "budget_monthly_revenue_target": float(
                     getattr(state, "budget_monthly_revenue_target", 0.0) or 0.0
@@ -1560,6 +2005,7 @@ def create_app() -> FastAPI:
                     "by_role": by_role[:20],
                     "trend_daily": trend_rows[-90:],
                 },
+                "workforce_recommendations": workforce_recommendations[:200],
             },
             "bulk_templates": {
                 "store_ops": [
@@ -1578,6 +2024,31 @@ def create_app() -> FastAPI:
                         "visitor_factor": float(t.visitor_factor),
                     }
                     for t in (getattr(state, "station_bulk_templates", []) or [])
+                ],
+            },
+            "bi_actions": {
+                "templates": [
+                    {
+                        "name": str(t.get("name") or ""),
+                        "description": str(t.get("description") or ""),
+                        "actions": _sanitize_bi_actions(t.get("actions") if isinstance(t.get("actions"), list) else []),
+                        "created_at": str(t.get("created_at") or ""),
+                        "updated_at": str(t.get("updated_at") or ""),
+                    }
+                    for t in (getattr(state, "bi_action_templates", []) or [])
+                    if isinstance(t, dict) and str(t.get("name") or "").strip()
+                ],
+                "checkpoints": [
+                    {
+                        "checkpoint_id": str(cp.get("checkpoint_id") or ""),
+                        "name": str(cp.get("name") or ""),
+                        "reason": str(cp.get("reason") or ""),
+                        "day": int(cp.get("day", state.day) or state.day),
+                        "created_at": str(cp.get("created_at") or ""),
+                        "action_count": len(_sanitize_bi_actions(cp.get("actions") if isinstance(cp.get("actions"), list) else [])),
+                    }
+                    for cp in (getattr(state, "bi_action_checkpoints", []) or [])
+                    if isinstance(cp, dict) and str(cp.get("checkpoint_id") or "").strip()
                 ],
             },
             "events": {
@@ -1614,6 +2085,18 @@ def create_app() -> FastAPI:
                 state.hq_credit_limit = max(0.0, float(payload.get("hq_credit_limit") or 0.0))
             if "hq_daily_interest_rate" in payload:
                 state.hq_daily_interest_rate = max(0.0, float(payload.get("hq_daily_interest_rate") or 0.0))
+            if "hq_short_credit_limit" in payload:
+                state.hq_short_credit_limit = max(0.0, float(payload.get("hq_short_credit_limit") or 0.0))
+            if "hq_medium_credit_limit" in payload:
+                state.hq_medium_credit_limit = max(0.0, float(payload.get("hq_medium_credit_limit") or 0.0))
+            if "hq_short_daily_interest_rate" in payload:
+                state.hq_short_daily_interest_rate = max(0.0, float(payload.get("hq_short_daily_interest_rate") or 0.0))
+            if "hq_medium_daily_interest_rate" in payload:
+                state.hq_medium_daily_interest_rate = max(0.0, float(payload.get("hq_medium_daily_interest_rate") or 0.0))
+            if "hq_credit_draw_mix_short_ratio" in payload:
+                state.hq_credit_draw_mix_short_ratio = max(
+                    0.0, min(1.0, float(payload.get("hq_credit_draw_mix_short_ratio") or 0.0))
+                )
             if "hq_auto_finance" in payload:
                 state.hq_auto_finance = bool(payload.get("hq_auto_finance"))
             if "budget_monthly_revenue_target" in payload:
@@ -1637,13 +2120,34 @@ def create_app() -> FastAPI:
                 if m not in {"revenue", "credit_usage"}:
                     m = "revenue"
                 state.finance_cost_allocation_method = m
+
+            short_limit = max(0.0, float(getattr(state, "hq_short_credit_limit", 0.0) or 0.0))
+            medium_limit = max(0.0, float(getattr(state, "hq_medium_credit_limit", 0.0) or 0.0))
+            if short_limit <= 0 and medium_limit <= 0 and float(getattr(state, "hq_credit_limit", 0.0) or 0.0) > 0:
+                ratio = max(0.0, min(1.0, float(getattr(state, "hq_credit_draw_mix_short_ratio", 0.7) or 0.0)))
+                state.hq_short_credit_limit = float(state.hq_credit_limit) * ratio
+                state.hq_medium_credit_limit = max(0.0, float(state.hq_credit_limit) - float(state.hq_short_credit_limit))
+
+            state.hq_credit_limit = max(0.0, float(getattr(state, "hq_short_credit_limit", 0.0) or 0.0)) + max(
+                0.0, float(getattr(state, "hq_medium_credit_limit", 0.0) or 0.0)
+            )
+            state.hq_credit_used = max(0.0, float(getattr(state, "hq_short_credit_used", 0.0) or 0.0)) + max(
+                0.0, float(getattr(state, "hq_medium_credit_used", 0.0) or 0.0)
+            )
             # Optional manual repay
             if "manual_repay" in payload:
                 repay = max(0.0, float(payload.get("manual_repay") or 0.0))
                 actual = min(repay, float(state.cash), float(getattr(state, "hq_credit_used", 0.0) or 0.0))
                 if actual > 0:
                     state.cash -= actual
-                    state.hq_credit_used = max(0.0, float(state.hq_credit_used) - actual)
+                    short_used = max(0.0, float(getattr(state, "hq_short_credit_used", 0.0) or 0.0))
+                    medium_used = max(0.0, float(getattr(state, "hq_medium_credit_used", 0.0) or 0.0))
+                    repay_short = min(short_used, actual)
+                    left_repay = actual - repay_short
+                    repay_medium = min(medium_used, left_repay)
+                    state.hq_short_credit_used = max(0.0, short_used - repay_short)
+                    state.hq_medium_credit_used = max(0.0, medium_used - repay_medium)
+                    state.hq_credit_used = max(0.0, float(state.hq_short_credit_used) + float(state.hq_medium_credit_used))
                     store_used = {
                         sid: max(0.0, float(getattr(st, "finance_credit_used", 0.0) or 0.0))
                         for sid, st in state.stores.items()
@@ -1668,6 +2172,343 @@ def create_app() -> FastAPI:
                             if deduct > 0:
                                 st.finance_credit_used = max(0.0, float(st.finance_credit_used) - deduct)
                                 left -= deduct
+            save_state(state)
+        return api_state()
+
+    @app.post("/api/finance/scenarios/compare")
+    def api_finance_scenarios_compare(payload: dict = Body(default={})):
+        days = max(1, int(payload.get("days", 30) or 30))
+        seed = payload.get("seed")
+        if seed is not None:
+            try:
+                seed = int(seed)
+            except Exception:
+                seed = None
+        scenarios = payload.get("scenarios") or []
+        if not isinstance(scenarios, list):
+            scenarios = []
+
+        with _lock:
+            base_state = copy.deepcopy(_ensure_state())
+
+        baseline = _simulate_finance_scenario_metrics(base_state, days=days, seed=seed, scenario={})
+        out = []
+        for sc in scenarios[:20]:
+            if not isinstance(sc, dict):
+                continue
+            name = str(sc.get("name") or "scenario").strip() or "scenario"
+            metrics = _simulate_finance_scenario_metrics(base_state, days=days, seed=seed, scenario=sc)
+            out.append(
+                {
+                    "name": name,
+                    "metrics": metrics,
+                    "delta_vs_baseline": {
+                        "total_finance_interest": float(
+                            round(
+                                float(metrics.get("total_finance_interest", 0.0))
+                                - float(baseline.get("total_finance_interest", 0.0)),
+                                4,
+                            )
+                        ),
+                        "total_net_cashflow": float(
+                            round(
+                                float(metrics.get("total_net_cashflow", 0.0))
+                                - float(baseline.get("total_net_cashflow", 0.0)),
+                                4,
+                            )
+                        ),
+                        "end_cash": float(
+                            round(
+                                float(metrics.get("end_cash", 0.0)) - float(baseline.get("end_cash", 0.0)),
+                                4,
+                            )
+                        ),
+                    },
+                }
+            )
+
+        return {
+            "days": int(days),
+            "seed": int(seed) if seed is not None else None,
+            "baseline": baseline,
+            "scenarios": out,
+        }
+
+    @app.post("/api/bi/actions/suggest")
+    def api_bi_actions_suggest(payload: dict = Body(default={})):
+        limit = max(1, min(200, int(payload.get("limit", 20) or 20)))
+        with _lock:
+            state = _ensure_state()
+            actions = _generate_bi_actions(state, limit=limit)
+            return {
+                "day": int(getattr(state, "day", 1) or 1),
+                "actions": actions,
+            }
+
+    @app.post("/api/bi/actions/backtest")
+    def api_bi_actions_backtest(payload: dict = Body(default={})):
+        days = max(1, int(payload.get("days", 30) or 30))
+        seed = payload.get("seed")
+        if seed is not None:
+            try:
+                seed = int(seed)
+            except Exception:
+                seed = None
+        raw_actions = payload.get("actions") or []
+        actions = [a for a in raw_actions if isinstance(a, dict)] if isinstance(raw_actions, list) else []
+        with _lock:
+            base_state = copy.deepcopy(_ensure_state())
+        result = _backtest_bi_actions(base_state, days=days, seed=seed, actions=actions)
+        return {
+            "days": int(days),
+            "seed": int(seed) if seed is not None else None,
+            **result,
+        }
+
+    @app.post("/api/bi/actions/apply")
+    def api_bi_actions_apply(payload: dict = Body(default={})):
+        raw_actions = payload.get("actions") or []
+        actions = _sanitize_bi_actions(raw_actions if isinstance(raw_actions, list) else [])
+        checkpoint_name = str(payload.get("checkpoint_name") or "").strip()
+        with _lock:
+            state = _ensure_state()
+            if actions:
+                _append_bi_checkpoint(
+                    state,
+                    reason="apply_bi_actions",
+                    actions=actions,
+                    name=checkpoint_name,
+                )
+            for a in actions:
+                _apply_bi_action_to_state(state, a)
+            save_state(state)
+        return api_state()
+
+    @app.post("/api/bi/actions/rollback")
+    def api_bi_actions_rollback(payload: dict = Body(default={})):
+        checkpoint_id = str(payload.get("checkpoint_id") or "").strip()
+        with _lock:
+            state = _ensure_state()
+            checkpoints = [cp for cp in (getattr(state, "bi_action_checkpoints", []) or []) if isinstance(cp, dict)]
+            if not checkpoints:
+                return {"error": "no checkpoints available"}
+            target = None
+            if checkpoint_id:
+                for cp in checkpoints:
+                    if str(cp.get("checkpoint_id") or "") == checkpoint_id:
+                        target = cp
+                        break
+            if target is None:
+                target = checkpoints[0]
+
+            payload_state = target.get("payload") if isinstance(target.get("payload"), dict) else {}
+            restored = _restore_state_from_checkpoint_payload(payload_state)
+            restored.bi_action_checkpoints = checkpoints
+            save_state(restored)
+        return api_state()
+
+def _compare_states_for_rollback(current_state: GameState, target_state: GameState) -> dict:
+    """Compare two game states and return the delta for rollback preview."""
+    def get_metric(s: GameState, key: str):
+        if key == "day":
+            return getattr(s, "day", 0) or 0
+        elif key == "cash":
+            return getattr(s, "hq_cash", 0) or 0
+        elif key == "hq_credit_used":
+            return getattr(s, "hq_credit_used", 0) or 0
+        elif key == "store_count":
+            stores = getattr(s, "stores", []) or []
+            return len([st for st in stores if (st.status or "") == "open"])
+        elif key == "total_headcount":
+            stores = getattr(s, "stores", []) or []
+            return sum((st.headcount or 0) for st in stores)
+        return 0
+    metrics = ["day", "cash", "hq_credit_used", "store_count", "total_headcount"]
+    result = {
+        "current": {},
+        "target": {},
+        "delta": {},
+    }
+    for m in metrics:
+        curr_val = get_metric(current_state, m)
+        targ_val = get_metric(target_state, m)
+        result["current"][m] = curr_val
+        result["target"][m] = targ_val
+        result["delta"][m] = curr_val - targ_val
+    return result
+
+
+    @app.post("/api/bi/actions/rollback/preview")
+    def api_bi_actions_rollback_preview(payload: dict = Body(default={})):
+        checkpoint_id = str(payload.get("checkpoint_id") or "").strip()
+        with _lock:
+            state = _ensure_state()
+            checkpoints = [cp for cp in (getattr(state, "bi_action_checkpoints", []) or []) if isinstance(cp, dict)]
+            if not checkpoints:
+                return {"error": "no checkpoints available"}
+            target_cp = None
+            if checkpoint_id:
+                for cp in checkpoints:
+                    if str(cp.get("checkpoint_id") or "") == checkpoint_id:
+                        target_cp = cp
+                        break
+            if target_cp is None:
+                target_cp = checkpoints[0]
+
+            payload_state = target_cp.get("payload") if isinstance(target_cp.get("payload"), dict) else {}
+            if not payload_state:
+                return {"error": "checkpoint payload empty"}
+            
+            # Temporary state for comparison
+            p_temp = state_path().with_name("_temp_rollback_preview.json")
+            p_temp.write_text(json.dumps(payload_state, ensure_ascii=False, indent=2), encoding="utf-8")
+            try:
+                target_state = load_state(p_temp)
+            finally:
+                if p_temp.exists(): p_temp.unlink()
+                
+            return _compare_states_for_rollback(state, target_state)
+    @app.post("/api/bi/action-templates")
+    def api_bi_action_template_upsert(payload: dict = Body(default={})):
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return {"error": "name is required"}
+        description = str(payload.get("description") or "").strip()
+        actions = _sanitize_bi_actions(payload.get("actions") if isinstance(payload.get("actions"), list) else [])
+        with _lock:
+            state = _ensure_state()
+            now = _now_iso()
+            templates = [
+                t
+                for t in (getattr(state, "bi_action_templates", []) or [])
+                if isinstance(t, dict) and str(t.get("name") or "") != name
+            ]
+            templates.insert(
+                0,
+                {
+                    "name": name,
+                    "description": description,
+                    "actions": actions,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            state.bi_action_templates = templates[:50]
+            save_state(state)
+        return api_state()
+
+    @app.delete("/api/bi/action-templates/{name}")
+    def api_bi_action_template_delete(name: str):
+        with _lock:
+            state = _ensure_state()
+            state.bi_action_templates = [
+                t
+                for t in (getattr(state, "bi_action_templates", []) or [])
+                if isinstance(t, dict) and str(t.get("name") or "") != str(name)
+            ]
+            save_state(state)
+        return api_state()
+
+    @app.patch("/api/bi/action-templates/{name}")
+    def api_bi_action_template_rename(name: str, payload: dict = Body(default={})):
+        new_name = str(payload.get("new_name") or "").strip()
+        if not new_name:
+            return {"error": "new_name is required"}
+        with _lock:
+            state = _ensure_state()
+            templates = list(getattr(state, "bi_action_templates", []) or [])
+            target = None
+            rest = []
+            for t in templates:
+                if not isinstance(t, dict):
+                    continue
+                tn = str(t.get("name") or "")
+                if tn == str(name):
+                    target = t
+                elif tn != new_name:
+                    rest.append(t)
+            if target is None:
+                return {"error": "template not found"}
+            target["name"] = new_name
+            target["updated_at"] = _now_iso()
+            rest.insert(0, target)
+            state.bi_action_templates = rest[:50]
+            save_state(state)
+        return api_state()
+
+    @app.get("/api/bi/action-templates/export")
+    def api_bi_action_template_export():
+        with _lock:
+            state = _ensure_state()
+            return {
+                "templates": [
+                    {
+                        "name": str(t.get("name") or ""),
+                        "description": str(t.get("description") or ""),
+                        "actions": _sanitize_bi_actions(t.get("actions") if isinstance(t.get("actions"), list) else []),
+                        "created_at": str(t.get("created_at") or ""),
+                        "updated_at": str(t.get("updated_at") or ""),
+                    }
+                    for t in (getattr(state, "bi_action_templates", []) or [])
+                    if isinstance(t, dict) and str(t.get("name") or "").strip()
+                ]
+            }
+
+    @app.post("/api/bi/action-templates/import")
+    def api_bi_action_template_import(payload: dict = Body(default={})):
+        mode = str(payload.get("mode") or "merge").strip().lower()
+        if mode not in {"merge", "replace"}:
+            mode = "merge"
+        raw_templates = payload.get("templates") or []
+        with _lock:
+            state = _ensure_state()
+            by_name: dict[str, dict] = {}
+            if mode == "merge":
+                for t in (getattr(state, "bi_action_templates", []) or []):
+                    if not isinstance(t, dict):
+                        continue
+                    tname = str(t.get("name") or "").strip()
+                    if tname:
+                        by_name[tname] = t
+
+            now = _now_iso()
+            for item in raw_templates:
+                if not isinstance(item, dict):
+                    continue
+                tname = str(item.get("name") or "").strip()
+                if not tname:
+                    continue
+                by_name[tname] = {
+                    "name": tname,
+                    "description": str(item.get("description") or "").strip(),
+                    "actions": _sanitize_bi_actions(item.get("actions") if isinstance(item.get("actions"), list) else []),
+                    "created_at": str(item.get("created_at") or now),
+                    "updated_at": now,
+                }
+
+            state.bi_action_templates = list(by_name.values())[:50]
+            save_state(state)
+        return api_state()
+
+    @app.post("/api/bi/action-templates/{name}/apply")
+    def api_bi_action_template_apply(name: str, payload: dict = Body(default={})):
+        with _lock:
+            state = _ensure_state()
+            templates = [t for t in (getattr(state, "bi_action_templates", []) or []) if isinstance(t, dict)]
+            target = None
+            for t in templates:
+                if str(t.get("name") or "") == str(name):
+                    target = t
+                    break
+            if target is None:
+                return {"error": "template not found"}
+            actions = _sanitize_bi_actions(target.get("actions") if isinstance(target.get("actions"), list) else [])
+            if not actions:
+                return {"error": "template has no actions"}
+            checkpoint_name = str(payload.get("checkpoint_name") or "").strip() or f"tpl:{name}"
+            _append_bi_checkpoint(state, reason=f"apply_template:{name}", actions=actions, name=checkpoint_name)
+            for a in actions:
+                _apply_bi_action_to_state(state, a)
             save_state(state)
         return api_state()
 
@@ -2336,6 +3177,18 @@ def create_app() -> FastAPI:
                         wf.sick_leave_rate_night = max(
                             0.0, min(1.0, float(w.get("sick_leave_rate_night") or 0.0))
                         )
+                    if "auto_schedule_enabled" in w:
+                        wf.auto_schedule_enabled = bool(w.get("auto_schedule_enabled", False))
+                    if "auto_recruit_budget_enabled" in w:
+                        wf.auto_recruit_budget_enabled = bool(w.get("auto_recruit_budget_enabled", False))
+                    if "auto_target_coverage" in w:
+                        wf.auto_target_coverage = max(0.5, min(1.2, float(w.get("auto_target_coverage") or 0.9)))
+                    if "auto_productivity_floor" in w:
+                        wf.auto_productivity_floor = max(0.0, float(w.get("auto_productivity_floor") or 0.0))
+                    if "auto_recruit_budget_min" in w:
+                        wf.auto_recruit_budget_min = max(0.0, float(w.get("auto_recruit_budget_min") or 0.0))
+                    if "auto_recruit_budget_max" in w:
+                        wf.auto_recruit_budget_max = max(0.0, float(w.get("auto_recruit_budget_max") or 0.0))
                     if "shifts_per_day" in w:
                         wf.shifts_per_day = max(1, int(w.get("shifts_per_day") or 1))
                     if "staffing_per_shift" in w:

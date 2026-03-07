@@ -3156,6 +3156,14 @@ const ReportsPage = () => {
 const DataOpsPage = () => {
   const { dispatch } = React.useContext(StateContext);
   const [importOpen, setImportOpen] = useState(false);
+  const [bulkCloseOpen, setBulkCloseOpen] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkInvSalvage, setBulkInvSalvage] = useState(0.2);
+  const [bulkAssetSalvage, setBulkAssetSalvage] = useState(0.1);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const runBulkClose = async () => {};
+  const [bulkResultOpen, setBulkResultOpen] = useState(false);
+  const [bulkResults, setBulkResults] = useState<{store_id: string; ok: boolean; message: string}[]>([]);
 
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-6">
