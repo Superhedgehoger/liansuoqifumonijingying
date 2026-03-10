@@ -57,7 +57,12 @@ import {
   apiRenameStationBulkTemplate,
   apiExportStationBulkTemplates,
   apiImportStationBulkTemplates,
-  apiUpsertServiceLine
+  apiUpsertServiceLine,
+  apiSuggestBiActions,
+  apiBacktestBiActions,
+  apiApplyBiActions,
+  apiPreviewRollbackBiActions,
+  apiRollbackBiActions
 } from './services/api';
 import {
   HashRouter as Router,
@@ -3980,6 +3985,14 @@ const StrategyPage = () => {
   const [biCategoryQuery, setBiCategoryQuery] = useState('');
   const [biRoleQuery, setBiRoleQuery] = useState('');
   const [biTrendWindow, setBiTrendWindow] = useState(30);
+  const [biSuggestedActions, setBiSuggestedActions] = useState<any[]>([]);
+  const [biSuggestLoading, setBiSuggestLoading] = useState(false);
+  const [biBacktestResult, setBiBacktestResult] = useState<any | null>(null);
+  const [biBacktestLoading, setBiBacktestLoading] = useState(false);
+  const [biSelectedActions, setBiSelectedActions] = useState<Set<string>>(new Set());
+  const [biCheckpointId, setBiCheckpointId] = useState('');
+  const [biRollbackPreview, setBiRollbackPreview] = useState<any | null>(null);
+  const [biRollbackLoading, setBiRollbackLoading] = useState(false);
 
   const filteredBi = useMemo(() => {
     const byRegion = (state.insights?.productivity?.by_region || []).filter((r: any) => String(r.region || '').includes(biRegionQuery));
@@ -4145,6 +4158,52 @@ const StrategyPage = () => {
   const deleteRule = async (sku: string) => {
     if (!selectedStoreId) return;
     await dispatch({ type: 'DELETE_REPL_RULE', payload: { store_id: selectedStoreId, sku } });
+  };
+
+  const loadBiSuggestions = async () => {
+    setBiSuggestLoading(true);
+    try {
+      const res = await apiSuggestBiActions(20);
+      setBiSuggestedActions(res.actions || []);
+    } finally {
+      setBiSuggestLoading(false);
+    }
+  };
+
+  const runBiBacktest = async () => {
+    const selected = biSuggestedActions.filter(a => biSelectedActions.has(a.action_id));
+    if (selected.length === 0) return;
+    setBiBacktestLoading(true);
+    try {
+      const res = await apiBacktestBiActions(30, selected);
+      setBiBacktestResult(res);
+    } finally {
+      setBiBacktestLoading(false);
+    }
+  };
+
+  const applyBiActions = async () => {
+    const selected = biSuggestedActions.filter(a => biSelectedActions.has(a.action_id));
+    if (selected.length === 0) return;
+    await apiApplyBiActions(selected, 'bi_apply_' + new Date().toISOString().slice(0, 10));
+    setBiSelectedActions(new Set());
+    setBiBacktestResult(null);
+  };
+
+  const previewRollback = async () => {
+    setBiRollbackLoading(true);
+    try {
+      const res = await apiPreviewRollbackBiActions(biCheckpointId);
+      setBiRollbackPreview(res);
+    } finally {
+      setBiRollbackLoading(false);
+    }
+  };
+
+  const executeRollback = async () => {
+    if (!biRollbackPreview) return;
+    await apiRollbackBiActions(biCheckpointId);
+    setBiRollbackPreview(null);
   };
 
   return (
@@ -4556,6 +4615,142 @@ const StrategyPage = () => {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* BI Decision Loop */}
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <div className="font-bold text-slate-900">BI 决策闭环（P3-Final）</div>
+            <div className="text-xs text-slate-500 mt-1">从钻取指标一键生成策略动作，支持回测与回滚。</div>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={loadBiSuggestions} disabled={biSuggestLoading} className="h-9 px-3 rounded-lg bg-slate-900 text-white text-sm font-semibold disabled:opacity-60">
+              {biSuggestLoading ? '加载中...' : '生成建议'}
+            </button>
+          </div>
+        </div>
+
+        {biSuggestedActions.length > 0 && (
+          <div className="p-6 space-y-4">
+            <div className="text-sm font-semibold text-slate-700">建议动作（点击选择）</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {biSuggestedActions.map(a => (
+                <div
+                  key={a.action_id}
+                  onClick={() => {
+                    const next = new Set(biSelectedActions);
+                    if (next.has(a.action_id)) next.delete(a.action_id);
+                    else next.add(a.action_id);
+                    setBiSelectedActions(next);
+                  }}
+                  className={`p-3 rounded-lg border cursor-pointer transition-colors ${biSelectedActions.has(a.action_id) ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-semibold text-slate-900">{a.name}</span>
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full ${a.priority === 'high' ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-600'}`}>{a.priority}</span>
+                  </div>
+                  <div className="text-xs text-slate-500">{a.reason}</div>
+                  {a.store_id && <div className="text-[10px] text-slate-400 mt-1">门店: {a.store_id}</div>}
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={runBiBacktest} disabled={biSelectedActions.size === 0 || biBacktestLoading} className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold disabled:opacity-60">
+                {biBacktestLoading ? '回测中...' : '回测选中动作'}
+              </button>
+              <button onClick={applyBiActions} disabled={biSelectedActions.size === 0} className="h-9 px-3 rounded-lg bg-blue-600 text-white text-sm font-semibold disabled:opacity-60">
+                应用选中动作
+              </button>
+            </div>
+          </div>
+        )}
+
+        {biBacktestResult && (
+          <div className="px-6 pb-6">
+            <div className="rounded-xl border border-slate-200 p-4 bg-slate-50">
+              <div className="text-sm font-semibold text-slate-700 mb-3">回测结果（{biBacktestResult.days} 天）</div>
+              <div className="grid grid-cols-4 gap-4 text-center">
+                <div>
+                  <div className="text-xs text-slate-500">营收Δ</div>
+                  <div className={`text-lg font-bold font-mono ${biBacktestResult.delta?.revenue >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {biBacktestResult.delta?.revenue?.toFixed(2) || '0.00'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500">利润Δ</div>
+                  <div className={`text-lg font-bold font-mono ${biBacktestResult.delta?.profit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {biBacktestResult.delta?.profit?.toFixed(2) || '0.00'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500">现金流Δ</div>
+                  <div className={`text-lg font-bold font-mono ${biBacktestResult.delta?.cashflow >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {biBacktestResult.delta?.cashflow?.toFixed(2) || '0.00'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500">订单Δ</div>
+                  <div className={`text-lg font-bold font-mono ${biBacktestResult.delta?.orders >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {biBacktestResult.delta?.orders || 0}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Rollback Section */}
+        <div className="px-6 py-4 border-t border-slate-200">
+          <div className="text-sm font-semibold text-slate-700 mb-3">回滚预览</div>
+          <div className="flex items-end gap-3">
+            <div className="flex-1">
+              <div className="text-xs text-slate-500 mb-1">检查点 ID（留空使用最新）</div>
+              <input
+                type="text"
+                value={biCheckpointId}
+                onChange={(e) => setBiCheckpointId(e.target.value)}
+                placeholder="可选：输入 checkpoint_id"
+                className="w-full h-9 rounded-lg border border-slate-200 px-3 text-sm"
+              />
+            </div>
+            <button onClick={previewRollback} disabled={biRollbackLoading} className="h-9 px-3 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold disabled:opacity-60">
+              {biRollbackLoading ? '加载中...' : '预览差异'}
+            </button>
+          </div>
+        </div>
+
+        {biRollbackPreview && !biRollbackPreview.error && (
+          <div className="px-6 pb-6">
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <div className="text-sm font-semibold text-amber-800 mb-3">回滚差异预览</div>
+              <div className="grid grid-cols-5 gap-2 text-xs">
+                <div className="font-semibold text-slate-600">指标</div>
+                <div className="font-semibold text-slate-600 text-right">当前</div>
+                <div className="font-semibold text-slate-600 text-right">回滚后</div>
+                <div className="font-semibold text-slate-600 text-right">增量</div>
+                <div></div>
+                {['day', 'cash', 'hq_credit_used', 'store_count', 'total_headcount'].map(key => (
+                  <React.Fragment key={key}>
+                    <div className="text-slate-600">{{day:'天数',cash:'现金',hq_credit_used:'授信占用',store_count:'营业门店',total_headcount:'总人数'}[key]}</div>
+                    <div className="text-right font-mono text-slate-500">{biRollbackPreview.current?.[key]?.toLocaleString() || 0}</div>
+                    <div className="text-right font-mono text-slate-900 font-bold">{biRollbackPreview.target?.[key]?.toLocaleString() || 0}</div>
+                    <div className={`text-right font-mono font-bold ${biRollbackPreview.delta?.[key] >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {biRollbackPreview.delta?.[key] >= 0 ? '+' : ''}{biRollbackPreview.delta?.[key]?.toLocaleString() || 0}
+                    </div>
+                    <div></div>
+                  </React.Fragment>
+                ))}
+              </div>
+              <button onClick={executeRollback} className="mt-4 h-9 px-4 rounded-lg bg-rose-600 text-white text-sm font-semibold">
+                确认回滚
+              </button>
+              <button onClick={() => setBiRollbackPreview(null)} className="mt-4 ml-2 h-9 px-4 rounded-lg border border-slate-300 text-slate-700 text-sm font-semibold">
+                取消
+              </button>
             </div>
           </div>
         )}

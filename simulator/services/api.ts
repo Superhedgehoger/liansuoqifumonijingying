@@ -436,3 +436,79 @@ export function apiPreviewRollbackBiActions(checkpointId?: string): Promise<Roll
     body: JSON.stringify({ checkpoint_id: checkpointId || '' })
   });
 }
+
+export type BiActionSuggestion = {
+  action_id: string;
+  action_type: string;
+  name: string;
+  store_id?: string;
+  priority: string;
+  reason: string;
+  store_patch?: Record<string, any>;
+  finance_patch?: Record<string, any>;
+};
+
+export type BiSuggestResult = {
+  day: number;
+  actions: BiActionSuggestion[];
+};
+
+export type BiBacktestResult = {
+  days: number;
+  seed: number | null;
+  baseline: { revenue: number; profit: number; cashflow: number; orders: number };
+  scenario: { revenue: number; profit: number; cashflow: number; orders: number };
+  delta: { revenue: number; profit: number; cashflow: number; orders: number };
+};
+
+export function apiSuggestBiActions(limit?: number): Promise<BiSuggestResult> {
+  return requestJson<BiSuggestResult>('/api/bi/actions/suggest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ limit: limit || 20 })
+  });
+}
+
+export function apiBacktestBiActions(days: number, actions: any[], seed?: number): Promise<BiBacktestResult> {
+  return requestJson<BiBacktestResult>('/api/bi/actions/backtest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ days, actions, seed })
+  });
+}
+
+export function apiApplyBiActions(actions: any[], checkpointName?: string): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/bi/actions/apply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ actions, checkpoint_name: checkpointName || '' })
+  });
+}
+
+export function apiRollbackBiActions(checkpointId?: string): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/bi/actions/rollback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ checkpoint_id: checkpointId || '' })
+  });
+}
+
+export function apiExportBiActionTemplates(): Promise<{ templates: BiActionTemplate[] }> {
+  return requestJson<{ templates: BiActionTemplate[] }>('/api/bi/action-templates/export');
+}
+
+export function apiImportBiActionTemplates(templates: BiActionTemplate[], mode?: 'merge' | 'replace'): Promise<SimulationState> {
+  return requestJson<SimulationState>('/api/bi/action-templates/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ templates, mode: mode || 'merge' })
+  });
+}
+
+export function apiApplyBiActionTemplate(name: string, checkpointName?: string): Promise<SimulationState> {
+  return requestJson<SimulationState>(`/api/bi/action-templates/${encodeURIComponent(name)}/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ checkpoint_name: checkpointName || '' })
+  });
+}

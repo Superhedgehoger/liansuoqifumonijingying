@@ -1,5 +1,16 @@
 # 更新日志
 
+## 0.7.7
+
+- P3-Final（BI 决策闭环）前端完整实现：
+  - 新增 BI API 客户端：`apiSuggestBiActions`、`apiBacktestBiActions`、`apiApplyBiActions`、`apiRollbackBiActions`
+  - StrategyPage 新增"BI 决策闭环"模块：建议动作生成、回测、应用、回滚预览
+  - 支持选择建议动作进行回测，显示营收/利润/现金流/订单变化
+  - 支持一键应用选中动作，并创建检查点
+  - 支持回滚预览，显示关键指标差异（天数/现金/授信/门店数/人数）
+- 后端修复 `create_app()` 返回 None 的问题：修正 `_compare_states_for_rollback` 函数缩进
+- 新增测试脚本 `tools/test_bi_rollback.py`
+
 ## 0.7.6
 
 - 后端新增BI动作回滚预览API（`/api/bi/actions/rollback/preview`）：对比当前状态与检查点状态，返回 day/cash/hq_credit_used/store_count/total_headcount 差异
