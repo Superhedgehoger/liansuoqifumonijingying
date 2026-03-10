@@ -2307,36 +2307,35 @@ def create_app() -> FastAPI:
             save_state(restored)
         return api_state()
 
-def _compare_states_for_rollback(current_state: GameState, target_state: GameState) -> dict:
-    """Compare two game states and return the delta for rollback preview."""
-    def get_metric(s: GameState, key: str):
-        if key == "day":
-            return getattr(s, "day", 0) or 0
-        elif key == "cash":
-            return getattr(s, "hq_cash", 0) or 0
-        elif key == "hq_credit_used":
-            return getattr(s, "hq_credit_used", 0) or 0
-        elif key == "store_count":
-            stores = getattr(s, "stores", []) or []
-            return len([st for st in stores if (st.status or "") == "open"])
-        elif key == "total_headcount":
-            stores = getattr(s, "stores", []) or []
-            return sum((st.headcount or 0) for st in stores)
-        return 0
-    metrics = ["day", "cash", "hq_credit_used", "store_count", "total_headcount"]
-    result = {
-        "current": {},
-        "target": {},
-        "delta": {},
-    }
-    for m in metrics:
-        curr_val = get_metric(current_state, m)
-        targ_val = get_metric(target_state, m)
-        result["current"][m] = curr_val
-        result["target"][m] = targ_val
-        result["delta"][m] = curr_val - targ_val
-    return result
-
+    def _compare_states_for_rollback(current_state: GameState, target_state: GameState) -> dict:
+        """Compare two game states and return the delta for rollback preview."""
+        def get_metric(s: GameState, key: str):
+            if key == "day":
+                return getattr(s, "day", 0) or 0
+            elif key == "cash":
+                return getattr(s, "hq_cash", 0) or 0
+            elif key == "hq_credit_used":
+                return getattr(s, "hq_credit_used", 0) or 0
+            elif key == "store_count":
+                stores = getattr(s, "stores", []) or []
+                return len([st for st in stores if (st.status or "") == "open"])
+            elif key == "total_headcount":
+                stores = getattr(s, "stores", []) or []
+                return sum((st.headcount or 0) for st in stores)
+            return 0
+        metrics = ["day", "cash", "hq_credit_used", "store_count", "total_headcount"]
+        result = {
+            "current": {},
+            "target": {},
+            "delta": {},
+        }
+        for m in metrics:
+            curr_val = get_metric(current_state, m)
+            targ_val = get_metric(target_state, m)
+            result["current"][m] = curr_val
+            result["target"][m] = targ_val
+            result["delta"][m] = curr_val - targ_val
+        return result
 
     @app.post("/api/bi/actions/rollback/preview")
     def api_bi_actions_rollback_preview(payload: dict = Body(default={})):
