@@ -82,7 +82,7 @@ const LoadingFallback = () => (
 );
 
 // --- Global Context ---
-const _StateContext = StateContext;
+// Using StateContext from context.ts (imported above)
 
 // --- Components ---
 
