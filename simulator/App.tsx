@@ -74,6 +74,12 @@ const StrategyPageLazy = lazy(() => import('./pages/StrategyPage'));
 const GISPageLazy = lazy(() => import('./pages/GISPage'));
 const EventsPageLazy = lazy(() => import('./pages/EventsPage'));
 const StoreDetailPageLazy = lazy(() => import('./pages/StoreDetailPage'));
+const DashboardPageLazy = lazy(() => import('./pages/DashboardPage'));
+const StationsPageLazy = lazy(() => import('./pages/StationsPage'));
+const StationDetailPageLazy = lazy(() => import('./pages/StationDetailPage'));
+const StoresPageLazy = lazy(() => import('./pages/StoresPage'));
+const ReportsPageLazy = lazy(() => import('./pages/ReportsPage'));
+const DataOpsPageLazy = lazy(() => import('./pages/DataOpsPage'));
 
 const LoadingFallback = () => (
   <div className="flex items-center justify-center h-64">
@@ -2195,15 +2201,15 @@ export default function App() {
             <Header />
             <main className="flex-1 overflow-auto bg-slate-50/50">
               <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/stations" element={<StationsPage />} />
-                <Route path="/stations/:id" element={<StationDetailPage />} />
-                <Route path="/stores" element={<StoresPage />} />
+                <Route path="/" element={<Suspense fallback={<LoadingFallback />}><DashboardPageLazy /></Suspense>} />
+                <Route path="/stations" element={<Suspense fallback={<LoadingFallback />}><StationsPageLazy /></Suspense>} />
+                <Route path="/stations/:id" element={<Suspense fallback={<LoadingFallback />}><StationDetailPageLazy /></Suspense>} />
+                <Route path="/stores" element={<Suspense fallback={<LoadingFallback />}><StoresPageLazy /></Suspense>} />
                 <Route path="/stores/:id" element={<Suspense fallback={<LoadingFallback />}><StoreDetailPageLazy /></Suspense>} />
-                <Route path="/data" element={<DataOpsPage />} />
+                <Route path="/data" element={<Suspense fallback={<LoadingFallback />}><DataOpsPageLazy /></Suspense>} />
                 <Route path="/events" element={<Suspense fallback={<LoadingFallback />}><EventsPageLazy /></Suspense>} />
                 <Route path="/strategy" element={<Suspense fallback={<LoadingFallback />}><StrategyPageLazy /></Suspense>} />
-                <Route path="/reports" element={<ReportsPage />} />
+                <Route path="/reports" element={<Suspense fallback={<LoadingFallback />}><ReportsPageLazy /></Suspense>} />
                 <Route path="/gis" element={<Suspense fallback={<LoadingFallback />}><GISPageLazy /></Suspense>} />
               </Routes>
             </main>
