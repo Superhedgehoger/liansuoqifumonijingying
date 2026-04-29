@@ -1,143 +1,301 @@
-# 加油站汽服门店模拟（CLI）
+# 加油站汽服连锁经营模拟系统
 
-一个轻量的命令行“模拟经营”小项目（v0.6.0）：模拟加油站汽服门店（自动洗车/人工洗车/综合汽服占位），重点跑通建设期CAPEX、折旧、耗材库存、薪酬体系、盈亏平衡（BEQ）。
+一个轻量的 **连锁汽服经营闭环模拟** 项目（v0.7.x），核心目标是帮助连锁加油站业态（自动洗车/人工洗车/综合汽服）实现 **盈亏平衡闭环** 与 **智能决策支持**。
 
-## 运行
+---
 
-要求：Python 3.10+（更低版本通常也可）。
+## 1. 项目解决的核心痛点
 
-```bash
-python run.py
+### 1.1 行业背景痛点
+
+| 痛点 | 本项目解决方案 |
+|------|---------------|
+| **投资回报不确定** | 盈亏平衡（BEQ）计算：门店需要多少订单才能cover固定成本？ |
+| **现金流管理困难** | 经营现金流追踪：收入 vs CAPEX支出 vs 采购 vs 发薪分离记录 |
+| **人力成本难控** | 可配置薪酬体系：底薪+计件+阶梯奖+利润提成，支持按角色/服务类别 |
+| **库存积压风险** | 自动补货规则：安全库存+触发点+目标库存+采购提前期 |
+| **扩张决策盲目** | 选址推荐引擎：候选站点评分、覆盖需求、边际收益分析 |
+| **策略验证困难** | A/B场景对比：同一初始状态并行仿真，不污染真实存档 |
+| **决策拍脑袋** | BI决策闭环：从钻取指标→生成策略动作→回测验证→一键应用 |
+
+### 1.2 核心功能矩阵
+
+| 阶段 | 核心能力 |
+|------|---------|
+| **v0.2** | 建设期CAPEX、折旧、耗材库存、薪酬体系、盈亏平衡（BEQ） |
+| **v0.3** | 完整薪酬模板化：计件/毛利提成/工时/阶梯奖/按角色 |
+| **v0.4** | 综合汽服项目+配件成本+技师提成+工时产能约束 |
+| **v0.5** | 多站点资产池、开关店流水线、沉没成本处理 |
+| **P1** | 选址推荐引擎、竞品分流模型、场景对比实验台 |
+| **P2** | 路网可达性、自动补货、事件系统、事件对冲动作 |
+| **P3-Start** | 人力生命周期（编制/流失/招聘/培训）、总部融资（授信/利率） |
+| **P3-Next** | 细化排班、请假/病假、预算滚动、BI看板 |
+| **P3-Final** | **BI决策闭环**、人力策略自动化、融资策略智能化 |
+
+---
+
+## 2. 核心逻辑流
+
+### 2.1 单日模拟长链（核心闭环）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        单日模拟流程                               │
+├─────────────────────────────────────────────────────────────────┤
+│  1. 车流计算                                                   │
+│     fuel_traffic = 基础流量 × (1 + 波动率×随机)                  │
+│     visitor_traffic = 访客流量 × (1 + 波动率×随机)               │
+│                                                                  │
+│  2. 事件影响（如果有）                                         │
+│     - 天气/投诉/停电 → traffic_multiplier, conversion_multiplier │
+│     - mitigation动作 → emergency_power, promo_boost, overtime   │
+│                                                                  │
+│  3. 转化与产能约束                                              │
+│     orders_s = min(potential_s, capacity_s)                      │
+│     potential_s = fuel×conv_fuel + visitor×conv_visitor        │
+│                                                                  │
+│  4. 收入与毛利计算                                             │
+│     revenue = Σ(订单数_s × 价格_s)                            │
+│     gross_profit = revenue - 耗材成本 - 配件COGS                │
+│                                                                  │
+│  5. 人力��本（当月累积，月底结算）                              │
+│     labor_cost = 固定底薪 + 计件提成 + 阶梯奖 + 利润分成         │
+│                                                                  │
+│  6. 折旧与固定费                                               │
+│     depreciation = Σ(设备每日计提)                            │
+│     fixed_overhead = 租金 + 水电 + 其他                          │
+│                                                                  │
+│  7. 经营利润与现金流                                           │
+│     operating_profit = gross_profit - labor - depreciation - fixed│
+│     cashflow = 现金收入 - 采购支出 - CAPEX - 薪酬现金支出          │
+│                                                                  │
+│  8. 盈亏平衡（BEQ）                                            │
+│     contribution_per_order = price - variable_cost - labor_per_order│
+│     BEQ = fixed_cost_daily / contribution_per_order          │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## 一键启动（推荐）
+### 2.2 BI决策闭环（智能决策流）
 
-- 后端 API + 新前端（两个窗口 + 自动打开浏览器）：双击 `start_dev.bat`
-- 默认启动：双击 `start.bat`
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    BI决策闭环流程 (P3-Final)                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────┐    ┌──────────────┐    ┌─────────────┐           │
+│  │ 指标钻取 │ -> │ 动作生成器   │ -> │ 回测验证   │           │
+│  └──────────┘    └──────────────┘    └─────────────┘           │
+│       ^                 │                   │                  │
+│       │                 v                   v                  │
+│       │          ┌──────────────┐    ┌─────────────┐           │
+│       └──────────│ 策略动作库   │ <- │ 对比结果   │           │
+│                  └──────────────┘    └─────────────┘           │
+│                                                                  │
+│  指标 → 动作映射规则示例：                                      │
+│  - 现金 < 阈值 且 授信可用 → 建议 draw_credit                 │
+│  - 人手缺口 > 0 → 建议 hire_staff                               │
+│  - 库存 < 安全库存 → 建议 purchase_inventory                  │
+│  - 人效持续走低 → 建议 adjust_price 或 adjust_shift            │
+│  - 连续亏损 → 建议 close_store 评估                            │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-## 新前端（React/Vite）
+### 2.3 多Agent协作（场景对比）
 
-前端代码在：`simulator/`。已接入后端 JSON API（`/api/*`），建议开发模式运行：
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  A/B场景对比 (Multi-Agent)                      │
+├──────────────────────────���─��────────────────────────────────────┤
+│  Agent 1: Baseline (对照组)                                   │
+│    - 使用当前状态                                               │
+│    - 运行 N 天模拟                                              │
+│    - 输出 KPI: 营收/利润/现金流/订单                            │
+│                                                                  │
+│  Agent 2: Scenario (实验组)                                    │
+│    - 深拷贝状态（不污染真实存档）                               │
+│    - 应用策略动作（调价/促销/招聘/调整参数）                  │
+│    - 运行 N 天模拟                                              │
+│    - 输出 KPI: 营收/利润/现金流/订单                         │
+│                                                                  │
+│  Coordinator: 结果汇总                                        │
+│    - 计算 Delta = Scenario - Baseline                         │
+│    - 生成对比报告                                              │
+│    - 提供决策建议                                              │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-1) 启动后端：
+### 2.4 人力策略自动化（闭环）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  人力策略自动化流程                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. 排班优化 (auto-schedule)                                    │
+│     - 输入：目标覆盖率、技能矩阵、服务类别需求              │
+│     - 计算：班次分配 × 技能系数 × 出勤率                        │
+│     - 输出：推荐班次配置、加班需求、预期产能因子              │
+│                                                                  │
+│  2. 招聘预算计算 (auto-recruit-budget)                          │
+│     - 输入：人手缺口、产能下限、生产力目标                    │
+│     - 计算：招聘预算 = 缺口 × 日均预算 × 招聘提前期           │
+│     - 输出：推荐预算、预期到岗人数、时间线                    │
+│                                                                  │
+│  3. 自动调整 (apply-strategy)                                   │
+│     - 启用自动排班标志                                          │
+│     - 配置招聘预算                                              │
+│     - 写入 workforce_config                                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 2.5 融资策略智能化
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  融资策略优化流程                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. 授信结构优化 (credit-optimize)                               │
+│     - 输入：未来 N 天现金流预测、可用授信额度                  │
+│     - 遍历：短贷/中贷不同比例组合                              │
+│     - 计算：利息成本 = 短期×利率×天数 + 中期×利率×天数          │
+│     - 约束：保持现金安全边际 > 阈值                             │
+│     - 输出：最优短贷/中贷比例                                   │
+│                                                                  │
+│  2. 利率情景对比 (rate-scenarios)                               │
+│     - 输入：短期利率选项、中期利率选项                         │
+│     - 输出：情景对比表 + 推荐最优配置                         │
+│                                                                  │
+│  3. 执行融资操作                                               │
+│     - draw_credit: 按最优比例提取                              │
+│     - repay_credit: 自动还款                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. 项目架构
+
+```
+连锁汽服经营模拟/
+├── src/simgame/              # 核心引擎
+│   ├── models.py            # 数据模型（Station/Store/Role/Asset...）
+│   ├── engine.py           # 模拟核心（单日计算逻辑）
+│   ├── webapp.py           # FastAPI 后端（15+ API端点）
+│   ├── storage.py          # 持久化（state.json + ledger.csv）
+│   ├── reporting.py        # 报表计算（BEQ/月报）
+│   └── presets.py          # 默认模板
+│
+├── simulator/              # React 前端
+│   ├── App.tsx             # 主应用（懒加载路由）
+│   ├── pages/              # 页面组件（10+ 懒加载页面）
+│   │   ├── DashboardPage   # 看板概览
+│   │   ├── StrategyPage   # 策略实验（P1/P2/P3-Final）
+│   │   ├── EventsPage     # 事件管理
+│   │   └── ...
+│   ├── services/api.ts      # API 调用封装
+│   └── types.ts           # TypeScript 类型
+│
+├── tools/                  # 测试工具
+│   └── test_p3_next.py     # P3 功能回归测试（8/8 通过）
+│
+├── data/                   # 存档目录
+│   ├── state.json          # 全量状态快照
+│   ├── ledger.csv          # 流水明细
+│   └── snapshots/          # checkpoint 存档
+│
+└── 规划-加油站汽服连锁.md  # 完整规划文档
+```
+
+---
+
+## 4. 技术亮点
+
+| 亮点 | 说明 |
+|------|------|
+| **零依赖外部状态** | 全量状态持久化到 state.json，重启可恢复 |
+| **账本审计** | ledger.csv 记录每笔流水，支持 Excel 分析 |
+| **回测不污染** | 场景对比使用深拷贝，验证后再应用 |
+| **多版本存档** | 支持 snapshot/checkpoint，回退到任意时点 |
+| **懒加载前端** | 主包 219KB，10+ 页面按需加载，首屏秒开 |
+| **完整闭环** | 指标→策略→回测→应用，决策有据可依 |
+
+---
+
+## 5. 快速开始
+
+### 5.1 一键启动
 
 ```bat
+# 窗口1：后端
 python web_run.py
-```
 
-2) 启动前端：
-
-```bat
-cd /d C:\Users\DJY\Documents\OpencodePJ\连锁汽服经营模拟\simulator
+# 窗口2：前端
+cd simulator
 npm install
 npm run dev
 ```
 
-3) 打开前端页面：
+访问 `http://127.0.0.1:3000/`
 
-- `http://127.0.0.1:3000/`
+### 5.2 API 测试
 
-说明：Vite 已配置代理，将 `/api` 与 `/download` 转发到后端 `http://127.0.0.1:8000`。
+```python
+import requests
 
-## 随机事件系统
+# 获取状态
+r = requests.get("http://127.0.0.1:8000/api/state")
+print(r.json()["day"], r.json()["cash"])
 
-- 前端入口：侧边栏 `事件管理`（路由：`/events`）
-- 后端字段：`GET /api/state` 返回 `events`（包含 rng_seed/templates/active/history）
-- 账本审计：`data/ledger.csv` 每行增加 `store_closed`、各倍率字段与 `event_summary_json`
-- 设计说明：`事件系统-研究与设计.md`
+# BI 动作建议
+r = requests.post("http://127.0.0.1:8000/api/bi/actions/suggest", json={"limit": 10})
+print(r.json()["actions"])
 
-### 最小测试（5 条）
+# 场景对比
+r = requests.post("http://127.0.0.1:8000/api/scenarios/compare", json={
+    "days": 30,
+    "scenarios": [{"name": "涨价10%", "store_patches": [{"store_id": "M1", "patch": {"traffic_conversion_rate": 1.1}}]}]
+})
+print(r.json()["delta"])
+```
 
-在项目根目录执行（Git Bash / 类 Unix shell）：
+---
+
+## 6. 测试验证
 
 ```bash
-export PYTHONPATH=src
-python tools/test_events.py
+# P3 功能回归测试
+python -c "import sys; sys.path.insert(0, 'src'); exec(open('tools/test_p3_next.py').read())"
+
+# 输出
+OK  test_workforce_shift_leave_fields
+OK  test_finance_allocation_method_credit_usage
+OK  test_bi_productivity_and_rolling_budget_present
+OK  test_async_simulate_job_flow
+OK  test_auto_workforce_tuning_adjusts_shift_and_budget
+OK  test_finance_structure_and_rate_scenario_compare
+OK  test_bi_decision_loop_suggest_backtest_apply
+OK  test_bi_action_template_and_rollback
+ALL OK (8 tests)
 ```
 
-Windows cmd 也可执行：
+---
 
-```bat
-set PYTHONPATH=src
-python tools\test_events.py
-```
+## 7. 下一步路线图（如有需要）
 
-## 策略实验（P1/P2）
+| 方向 | 可能的升级 |
+|------|----------|
+| GIS增强 | 引入真实路网（osmnx）替代半径近似 |
+| 客流仿真 | 引入 Mesa 做 ABM 顾客行为分流 |
+| 选址引擎 | 引入 spopt/MCLP 做最优覆盖选址 |
+| 运营实验台 | 并行多策略场景 vs 统一 KPI 对比 |
 
-- 前端页面：`/strategy`
-- 能力：
-  - 选址推荐（`/api/site-recommendations`）
-  - 竞品分流参数（门店 `local_competition_intensity` / `attractiveness_index`）
-  - A/B 场景对比（`/api/scenarios/compare`，内存并行仿真，不写真实存档）
-  - 事件对冲动作：应急供电/临促补偿/加班扩容（门店 `mitigation`）
-  - 自动补货：安全库存 + 触发点 + 目标库存 + 采购提前期（replenishment rules）
-  - P3 启动：人力生命周期（流失/招聘/培训）+ 总部融资（授信/利率/自动融资）+ 风险预警
+---
 
-补充（P2-1 进展）：
+## 8. License
 
-- 选址推荐支持 `distance_mode`：
-  - `road_proxy`（默认，按城市/片区/站点类型/波动率做可达性近似）
-  - `road_graph`（站点路网图最短路近似，可调 `graph_k_neighbors`）
-  - `euclidean`（直线距离）
+MIT License - 欢迎 fork 与 PR。
 
-P2 回归测试：
+---
 
-```bash
-export PYTHONPATH=src
-python tools/test_p2_midterm.py
-```
-
-## 表单路由（导入/导出/运维）
-
-后端提供一个不依赖旧 WebUI 模板的简单表单页面：
-
-- `http://127.0.0.1:8000/ops`
-
-支持上传替换 `state.json` / `ledger.csv`（会自动备份），以及一键模拟/重置。
-
-## 测试建议
-
-1) 双击 `start_dev.bat`
-2) 在前端依次测试：
-   - 站点：新增/编辑（地市/片区/服务商）/删除
-   - 门店：新建（开始运营日、客流转化倍率）
-   - 门店详情页：
-     - 概览配置：保存
-     - 服务线：新增/编辑/删除
-     - 项目：新增/删除
-     - 库存：采购入库
-     - 固定资产：新增/删除
-     - 薪酬：新增岗位/删除岗位（人数变化）
-   - 模拟：过一天/过一周
-3) 对照 `data/state.json` 与 `data/ledger.csv` 是否有变化
-
-## 运行后在哪里查看
-
-- 终端输出：每次选择 `过一天（日结）` 会打印当天日报
-- 存档文件：`data/state.json`（自动保存，下一次启动会自动读取）
-- 流水导出：`data/ledger.csv`（每过一天追加一行/店/天的明细，可用 Excel 打开）
-
-后端 API 会写入同一份 `data/state.json` 与 `data/ledger.csv`。
-
-如果出现中文乱码，可尝试在 Windows 终端先执行：
-
-```bat
-chcp 65001
-python -X utf8 run.py
-```
-
-## 玩法（菜单）
-
-- 站点：新增/配置加油车辆与访客车辆（日流量+波动）
-- 门店：新增门店（可设置建设期天数与CAPEX）
-- 服务线：配置自动洗车/人工洗车等参数（价格、转化率、产能、成本）
-- 库存：采购耗材并在订单发生时扣减
-- 薪酬：配置角色底薪、计件、阶梯奖、利润提成（按月结算）
-- 过一天：出日报，记录收入、成本、经营利润、净现金流
-- 报表：月累计、盈亏平衡（BEQ）
-
-## 文档
-
-- `C:\Users\DJY\Documents\OpencodePJ\连锁汽服经营模拟\最小升级方案-加油站汽服.md`
-- `C:\Users\DJY\Documents\OpencodePJ\连锁汽服经营模拟\规划-加油站汽服连锁.md`
-- `C:\Users\DJY\Documents\OpencodePJ\连锁汽服经营模拟\开源参考-连锁经营.md`
+> **核心理念**：��门��经营变成**可计算、可模拟、可验证**的闭环，让每一个决策都有数据支撑，而不是拍脑袋。
