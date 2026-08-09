@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import json
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict
 
@@ -35,6 +34,7 @@ from simgame.models import (
     UtilitiesConfig,
     UsedCarBizConfig,
 )
+from simgame.schema import build_envelope, normalize_envelope, validate_state
 
 
 def project_root() -> Path:
@@ -123,10 +123,7 @@ def reset_data_files() -> None:
 
 def save_state(state: GameState, path: Path | None = None) -> None:
     p = path or state_path()
-    payload = {
-        "version": "0.7.3",
-        "state": asdict(state),
-    }
+    payload = build_envelope(state)
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -410,7 +407,7 @@ def _load_opex_config(d: Any) -> OpexConfig:
 
 def load_state(path: Path | None = None) -> GameState:
     p = path or state_path()
-    payload = json.loads(p.read_text(encoding="utf-8"))
+    payload = normalize_envelope(json.loads(p.read_text(encoding="utf-8")))
     d = payload.get("state", {})
 
     state = GameState(day=int(d.get("day", 1)), cash=float(d.get("cash", 0.0)))
@@ -522,7 +519,10 @@ def load_state(path: Path | None = None) -> GameState:
             }
         )
     state.bi_action_checkpoints = state.bi_action_checkpoints[:100]
-    _seed_default_event_templates(state)
+    # Legacy saves relied on load-time defaults. A v0.8 save treats an explicit
+    # empty template collection as user intent and must round-trip unchanged.
+    if payload.get("migrated_from"):
+        _seed_default_event_templates(state)
 
     # Stations
     for sid, sd in (d.get("stations") or {}).items():
@@ -792,6 +792,7 @@ def load_state(path: Path | None = None) -> GameState:
 
     # Ledger is intentionally not restored (keeps state.json small); use ledger.csv for history.
     state.ledger = []
+    validate_state(state)
     return state
 
 
