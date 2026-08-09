@@ -64,7 +64,12 @@ const StationsPage = () => {
 
   const runBulkDeleteStations = async () => {
     if (selectedStationIds.length === 0) return;
-    if (!window.confirm(`确认批量删除 ${selectedStationIds.length} 个站点？可能导致关联门店孤立。`)) return;
+    const linkedStores = state.stores.filter((store) => selectedStationIds.includes(store.station_id));
+    if (linkedStores.length > 0) {
+      window.alert(`无法删除：请先迁移或删除关联门店 ${linkedStores.map((store) => store.store_id).join('、')}`);
+      return;
+    }
+    if (!window.confirm(`确认批量删除 ${selectedStationIds.length} 个站点？`)) return;
     setBulkBusy(true);
     try {
       for (const id of selectedStationIds) {
@@ -267,6 +272,11 @@ const StationsPage = () => {
                 </Link>
                 <button 
                   onClick={() => {
+                     const linkedStores = state.stores.filter((store) => store.station_id === station.station_id);
+                     if (linkedStores.length > 0) {
+                       window.alert(`无法删除：请先迁移或删除关联门店 ${linkedStores.map((store) => store.store_id).join('、')}`);
+                       return;
+                     }
                      if(window.confirm('确定要删除该站点吗？')) dispatch({type: 'DELETE_STATION', payload: station.station_id});
                   }}
                   className="px-3 py-2 text-red-600 hover:bg-red-50 rounded border border-transparent hover:border-red-100 transition-colors"

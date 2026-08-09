@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import asdict
 
-from fastapi import Body, FastAPI, File, Form, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
@@ -52,6 +52,7 @@ from simgame.storage import (
 )
 
 from simgame.reporting import compute_beq_for_store
+from simgame.schema import stores_referencing_station
 
 
 _lock = threading.Lock()
@@ -5249,6 +5250,17 @@ def create_app() -> FastAPI:
     def api_station_delete(station_id: str):
         with _lock:
             state = _ensure_state()
+            linked_store_ids = stores_referencing_station(state, station_id)
+            if linked_store_ids:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "station_has_stores",
+                        "message": "请先迁移或删除关联门店，再删除站点",
+                        "station_id": station_id,
+                        "store_ids": linked_store_ids,
+                    },
+                )
             if station_id in state.stations:
                 del state.stations[station_id]
                 save_state(state)

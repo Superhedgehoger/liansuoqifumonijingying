@@ -6,7 +6,13 @@ from pathlib import Path
 
 from simgame.models import GameState, Station, Store
 from simgame.presets import apply_default_store_template
-from simgame.schema import CURRENT_SCHEMA_VERSION, DataModelError, normalize_envelope, validate_state
+from simgame.schema import (
+    CURRENT_SCHEMA_VERSION,
+    DataModelError,
+    normalize_envelope,
+    stores_referencing_station,
+    validate_state,
+)
 from simgame.storage import load_state, save_state
 
 
@@ -65,6 +71,21 @@ class DataModelTests(unittest.TestCase):
         state.stores["orphan"] = Store(store_id="orphan", name="orphan", station_id="missing")
         with self.assertRaisesRegex(DataModelError, "missing station"):
             validate_state(state)
+
+    def test_station_reference_guard_lists_linked_stores_stably(self):
+        state = self.make_state()
+        state.stores["store-2"] = Store(
+            store_id="store-2", name="二号店", station_id="station-1"
+        )
+        state.stores["store-0"] = Store(
+            store_id="store-0", name="其他店", station_id="station-2"
+        )
+
+        self.assertEqual(
+            ["store-1", "store-2"],
+            stores_referencing_station(state, "station-1"),
+        )
+        self.assertEqual([], stores_referencing_station(state, "unused"))
 
 
 if __name__ == "__main__":

@@ -66,6 +66,16 @@ def build_envelope(state: GameState) -> dict[str, Any]:
     }
 
 
+def stores_referencing_station(state: GameState, station_id: str) -> list[str]:
+    """Return stable store IDs that prevent safe deletion of a station."""
+
+    return sorted(
+        store_id
+        for store_id, store in state.stores.items()
+        if store.station_id == station_id
+    )
+
+
 def validate_state(state: GameState) -> None:
     """Validate cross-entity invariants that dataclass type hints cannot express."""
 

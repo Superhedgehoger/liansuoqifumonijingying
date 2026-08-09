@@ -45,7 +45,12 @@ const StationDetailPage = () => {
                <h1 className="text-xl font-bold text-slate-900">编辑站点: {station.name}</h1>
                <button 
                   onClick={() => {
-                     if(window.confirm("确定删除该站点？这将导致关联门店变成孤立状态。")) {
+                     const linkedStores = state.stores.filter((store) => store.station_id === station.station_id);
+                     if (linkedStores.length > 0) {
+                        window.alert(`无法删除：请先迁移或删除关联门店 ${linkedStores.map((store) => store.store_id).join('、')}`);
+                        return;
+                     }
+                     if(window.confirm("确定删除该站点？")) {
                         dispatch({type: 'DELETE_STATION', payload: station.station_id});
                         navigate('/stations');
                      }
